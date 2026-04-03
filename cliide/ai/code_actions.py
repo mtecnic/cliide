@@ -236,6 +236,7 @@ class CodeActions:
             Event dicts for UI updates
         """
         from cliide.utils.logger import log
+        from cliide.core.config import get_config
 
         manager = self._agent.sub_agent_manager
         if manager is None:
