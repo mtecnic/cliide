@@ -89,8 +89,8 @@ class ToolsConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Enable AI tool calling")
     confirmation_mode: str = Field(
-        default="moderate",
-        description="Confirmation mode: 'conservative' (confirm all writes), 'moderate' (auto-approve code writes, confirm shell/git), 'aggressive' (only confirm destructive ops)"
+        default="dangerous",
+        description="Confirmation mode: 'auto' (no confirmations), 'dangerous' (confirm writes/deletes), 'all' (confirm everything)"
     )
     timeout_seconds: int = Field(default=30, ge=1, description="Timeout for tool operations in seconds")
     max_file_size_mb: float = Field(default=10.0, ge=0.1, description="Maximum file size for read/write operations in MB")

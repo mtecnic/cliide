@@ -27,9 +27,10 @@ class ToolConfirmationDialog(ModalScreen):
         width: 70;
         height: auto;
         max-height: 80%;
-        border: thick $primary;
+        border: round $warning;
         background: $surface;
         padding: 1 2;
+        margin: 1 2;
     }
 
     #title {
