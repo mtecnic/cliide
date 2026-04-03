@@ -14,12 +14,13 @@ from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Input, Static
 
+from cliide.ai.context_builder import ContextBuilder
+from cliide.ai.event_bus import AgentEvent, AgentEventType, get_event_bus
 from cliide.core.events import AIRequestStarted, ToolExecutionStarted, ToolExecutionCompleted
 from cliide.core.session import ChatSession
 from cliide.ui.chat_tabs import ChatTabs, ChatSessionSelected, NewChatRequested, CloseChatRequested
 from cliide.ui.file_picker import FilePicker
 from cliide.utils.logger import log
-from cliide.ai.event_bus import AgentEvent, AgentEventType, get_event_bus
 
 
 # Language detection for syntax highlighting
@@ -806,7 +807,6 @@ class ChatPanel(Widget):
 
         if mentioned_files:
             # Format files and add to message
-            from cliide.ai.context_builder import ContextBuilder
             files_context = ContextBuilder.format_mentioned_files(mentioned_files)
             enhanced_message = f"{message}{files_context}"
             log(f"[CHAT] Enhanced message with {len(mentioned_files)} files, total length: {len(enhanced_message)}")
