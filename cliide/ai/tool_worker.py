@@ -49,6 +49,55 @@ INLINE_TOOLS = {
     "approve_subagent",  # Needs immediate response
 }
 
+# Tools that are safe to run in parallel (read-only, no side effects)
+PARALLEL_SAFE_TOOLS = {
+    "read_file",
+    "list_directory",
+    "grep",
+    "search_files",
+    "find_symbol",
+    "extract_symbols",
+    "get_file_summary",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "recall_memory",
+    "web_search",
+    "fetch_url",
+}
+
+# Tools that must run sequentially (have side effects or need ordering)
+SEQUENTIAL_TOOLS = {
+    "write_file",
+    "edit_file",
+    "run_command",
+    "git_commit",
+    "git_add",
+    "git_push",
+    "git_checkout",
+    "store_memory",
+    "delete_file",
+    "create_directory",
+}
+
+
+def classify_tool(tool_name: str) -> str:
+    """Classify a tool as 'inline', 'parallel', or 'sequential'.
+
+    Args:
+        tool_name: Name of the tool
+
+    Returns:
+        Classification: 'inline', 'parallel', or 'sequential'
+    """
+    if tool_name in INLINE_TOOLS:
+        return "inline"
+    elif tool_name in SEQUENTIAL_TOOLS:
+        return "sequential"
+    else:
+        # Default to parallel for unknown tools (read operations)
+        return "parallel"
+
 
 class ToolWorkerPool:
     """Manages concurrent tool execution workers.

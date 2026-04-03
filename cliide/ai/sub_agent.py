@@ -13,6 +13,7 @@ from cliide.ai.tools.base import (
     SubAgentTrustLevel, get_approval_target
 )
 from cliide.ai.event_bus import AgentEventBus, AgentEvent, AgentEventType, get_event_bus
+from cliide.utils.logger import log
 
 
 class SubAgentStatus(str, Enum):
@@ -177,7 +178,18 @@ class SubAgentManager:
             max_iterations: Maximum iterations
             timeout: Timeout in seconds
         """
+        from cliide.core.config import get_config
+
         task = self._tasks[task_id]
+
+        # Prevent nested sub-agent spawning (no fan-out from sub-agents)
+        # This follows OpenClaw's pattern to prevent runaway recursion
+        config = get_config()
+        if not config.subagent.allow_nested_spawn:
+            # Remove spawn_agent and related tools from allowed_tools
+            nested_spawn_tools = {"spawn_agent", "list_agents", "get_agent_result"}
+            allowed_tools = [t for t in allowed_tools if t not in nested_spawn_tools]
+            log(f"[SUB_AGENT] Filtered nested spawn tools. Remaining: {allowed_tools}")
 
         async with self._semaphore:
             task.status = SubAgentStatus.RUNNING

@@ -32,7 +32,7 @@ from cliide.ai.sub_agent import (
     SubAgentManager, SpawnAgentTool, ListAgentsTool, GetAgentResultTool,
     ApproveSubagentTool, ListPendingApprovalsTool
 )
-from cliide.ai.tool_worker import ToolWorkerPool, should_delegate
+from cliide.ai.tool_worker import ToolWorkerPool, should_delegate, classify_tool, SEQUENTIAL_TOOLS
 from cliide.utils.audit_log import get_audit_logger
 from cliide.core.config import get_config
 
@@ -347,19 +347,23 @@ class ToolAgent:
                     yield {"type": "done", "reason": "loop_detected"}
                     return
 
-                # Process tool calls - delegate to worker pool for parallel execution
+                # Process tool calls with adaptive batching based on concurrency limits
+                # and tool classification (sequential vs parallel-safe)
                 tool_results = []
-                pending_delegated: list[dict[str, Any]] = []
-                inline_results: dict[str, Any] = {}
+                all_results: dict[str, Any] = {}
 
-                # Phase 1: Parse and submit all tool calls
+                # Get concurrency limit from config
+                inference_config = get_config().inference
+                max_concurrent = inference_config.max_concurrent_requests
+
+                # Separate tools by classification
+                parsed_tools: list[dict[str, Any]] = []
                 for tool_call in tool_calls:
                     function = tool_call["function"]
                     tool_name = function["name"]
                     args_str = function.get("arguments", "{}")
                     tool_call_id = tool_call.get("id", "")
 
-                    # Parse arguments
                     try:
                         args = json.loads(args_str)
                     except json.JSONDecodeError:
@@ -369,30 +373,45 @@ class ToolAgent:
                         }
                         continue
 
+                    classification = classify_tool(tool_name)
+                    parsed_tools.append({
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "args": args,
+                        "classification": classification,
+                    })
+
+                # Split into sequential and parallel-safe tools
+                sequential_tools = [t for t in parsed_tools if t["classification"] == "sequential"]
+                parallel_tools = [t for t in parsed_tools if t["classification"] != "sequential"]
+
+                # Helper to execute a single tool
+                async def execute_tool(tool_info: dict) -> dict:
+                    tool_name = tool_info["tool_name"]
+                    args = tool_info["args"]
+                    tool_call_id = tool_info["tool_call_id"]
+
                     # Emit tool start event
-                    yield {
+                    yield_data = {
                         "type": "tool_start",
                         "tool": tool_name,
                         "args": args,
                         "tool_call_id": tool_call_id
                     }
 
-                    # Decide: delegate to worker pool or execute inline
-                    if self.worker_pool and should_delegate(tool_name):
-                        # Submit to worker pool (async execution)
-                        await self.worker_pool.submit(
-                            tool_call_id=tool_call_id,
-                            tool_name=tool_name,
-                            args=args,
-                        )
-                        pending_delegated.append({
-                            "tool_call_id": tool_call_id,
-                            "tool_name": tool_name,
-                            "args": args,
-                        })
-                    else:
-                        # Execute inline (fast tools)
-                        try:
+                    try:
+                        if self.worker_pool and should_delegate(tool_name):
+                            await self.worker_pool.submit(
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                                args=args,
+                            )
+                            result_dict = await self.worker_pool.wait_for_all(
+                                [tool_call_id],
+                                timeout=config.timeout_seconds * 2,
+                            )
+                            result = result_dict.get(tool_call_id)
+                        else:
                             result = await asyncio.wait_for(
                                 self.registry.execute_tool(
                                     tool_name,
@@ -401,51 +420,93 @@ class ToolAgent:
                                 ),
                                 timeout=config.timeout_seconds
                             )
-                        except asyncio.TimeoutError:
-                            from cliide.ai.tools.base import ToolResult
-                            result = ToolResult(
-                                success=False,
-                                error=f"Tool execution timed out after {config.timeout_seconds}s"
-                            )
-                        except Exception as e:
-                            from cliide.ai.tools.base import ToolResult
-                            result = ToolResult(
-                                success=False,
-                                error=f"Tool execution failed: {str(e)}"
-                            )
+                    except asyncio.TimeoutError:
+                        from cliide.ai.tools.base import ToolResult
+                        result = ToolResult(
+                            success=False,
+                            error=f"Tool execution timed out after {config.timeout_seconds}s"
+                        )
+                    except Exception as e:
+                        from cliide.ai.tools.base import ToolResult
+                        result = ToolResult(
+                            success=False,
+                            error=f"Tool execution failed: {str(e)}"
+                        )
 
-                        inline_results[tool_call_id] = {
-                            "tool_name": tool_name,
-                            "args": args,
-                            "result": result,
+                    return {
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "args": args,
+                        "result": result,
+                        "yield_data": yield_data,
+                    }
+
+                # Phase 1: Execute sequential tools one at a time (order matters)
+                for tool_info in sequential_tools:
+                    tool_result = await execute_tool(tool_info)
+                    yield tool_result["yield_data"]  # tool_start
+                    all_results[tool_result["tool_call_id"]] = tool_result
+                    log(f"[AGENT] Sequential tool {tool_info['tool_name']} completed")
+
+                # Phase 2: Execute parallel-safe tools in batches
+                if parallel_tools:
+                    # Emit all start events first
+                    for tool_info in parallel_tools:
+                        yield {
+                            "type": "tool_start",
+                            "tool": tool_info["tool_name"],
+                            "args": tool_info["args"],
+                            "tool_call_id": tool_info["tool_call_id"]
                         }
 
-                # Phase 2: Wait for all delegated tools to complete
-                delegated_results: dict[str, Any] = {}
-                if pending_delegated and self.worker_pool:
-                    delegated_results = await self.worker_pool.wait_for_all(
-                        [tc["tool_call_id"] for tc in pending_delegated],
-                        timeout=config.timeout_seconds * 2,  # Allow more time for parallel batch
-                    )
+                    # Process in batches of max_concurrent
+                    for i in range(0, len(parallel_tools), max_concurrent):
+                        batch = parallel_tools[i:i + max_concurrent]
+                        log(f"[AGENT] Processing parallel batch {i//max_concurrent + 1}: {len(batch)} tools (max_concurrent={max_concurrent})")
 
-                # Phase 3: Process all results (inline + delegated)
+                        # Submit all tools in this batch
+                        if self.worker_pool:
+                            for tool_info in batch:
+                                if should_delegate(tool_info["tool_name"]):
+                                    await self.worker_pool.submit(
+                                        tool_call_id=tool_info["tool_call_id"],
+                                        tool_name=tool_info["tool_name"],
+                                        args=tool_info["args"],
+                                    )
+
+                            # Wait for batch to complete
+                            batch_ids = [t["tool_call_id"] for t in batch if should_delegate(t["tool_name"])]
+                            if batch_ids:
+                                batch_results = await self.worker_pool.wait_for_all(
+                                    batch_ids,
+                                    timeout=config.timeout_seconds * 2,
+                                )
+                                for tool_info in batch:
+                                    tcid = tool_info["tool_call_id"]
+                                    if tcid in batch_results:
+                                        all_results[tcid] = {
+                                            "tool_call_id": tcid,
+                                            "tool_name": tool_info["tool_name"],
+                                            "args": tool_info["args"],
+                                            "result": batch_results[tcid],
+                                        }
+                        else:
+                            # No worker pool, execute inline sequentially
+                            for tool_info in batch:
+                                tool_result = await execute_tool(tool_info)
+                                all_results[tool_result["tool_call_id"]] = tool_result
+
+                # Phase 3: Process all results
                 for tool_call in tool_calls:
                     tool_call_id = tool_call.get("id", "")
                     function = tool_call["function"]
                     tool_name = function["name"]
 
-                    # Get result from either inline or delegated
-                    if tool_call_id in inline_results:
-                        info = inline_results[tool_call_id]
+                    # Get result from all_results
+                    if tool_call_id in all_results:
+                        info = all_results[tool_call_id]
                         result = info["result"]
                         args = info["args"]
-                    elif tool_call_id in delegated_results:
-                        result = delegated_results[tool_call_id]
-                        # Find args from pending list
-                        args = next(
-                            (tc["args"] for tc in pending_delegated if tc["tool_call_id"] == tool_call_id),
-                            {}
-                        )
                     else:
                         # Should not happen, but handle gracefully
                         from cliide.ai.tools.base import ToolResult
