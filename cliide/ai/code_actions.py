@@ -134,6 +134,7 @@ class CodeActions:
         message: str,
         code_context: Optional[str] = None,
         file_name: Optional[str] = None,
+        language: Optional[str] = None,
         conversation_history: Optional[list[dict[str, str]]] = None,
         use_tools: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -143,6 +144,7 @@ class CodeActions:
             message: User message
             code_context: Current code context
             file_name: Current file name
+            language: Programming language of current file
             conversation_history: Previous messages
             use_tools: Whether to enable tool calling (default True)
 
@@ -156,7 +158,7 @@ class CodeActions:
 
         # Build prompt with context
         user_prompt = self.prompt_manager.build_chat_prompt(
-            message, code_context, file_name
+            message, code_context, file_name, language
         )
 
         # Build message history

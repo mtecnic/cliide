@@ -12,6 +12,7 @@ from textual.containers import Container, Horizontal
 from textual.widgets import Footer, Header
 
 from cliide.ai.code_actions import CodeActions
+from cliide.ai.context_builder import ContextBuilder
 from cliide.ai.event_bus import AgentEvent, AgentEventType, get_event_bus
 from cliide.ai.prompt_manager import PromptManager
 from cliide.core.config import Config, get_config
@@ -914,14 +915,8 @@ class CliideApp(App[None]):
             command, content = self.prompt_manager.parse_command(event.prompt)
             log(f"[APP] Command: {command}, Content: {content}")
 
-            # Extract @mentioned files
-            mentioned_files = chat.get_mentioned_files_content(event.prompt)
-            mentioned_files_context = ""
-            if mentioned_files:
-                log(f"[APP] Found {len(mentioned_files)} @mentioned files: {list(mentioned_files.keys())}")
-                # Format @mentioned files for inclusion in prompt
-                from cliide.ai.context_builder import ContextBuilder
-                mentioned_files_context = ContextBuilder.format_mentioned_files(mentioned_files)
+            # Note: @mentioned files are already parsed and appended by chat.send_message()
+            # No need to re-parse here - the prompt already contains file contents
 
             # Start streaming response
             log("[APP] Starting AI response")
@@ -934,13 +929,22 @@ class CliideApp(App[None]):
                 file_path = str(editor.current_file) if editor.current_file else None
                 language = self.code_actions.context_builder._detect_language(file_path) if file_path else None
 
-                # If no code is selected but we have an open file, use full file as context
-                code_context = selected_code if selected_code else (editor.text if editor.current_file else None)
-
-                # Append @mentioned files to content
-                enhanced_content = content
-                if mentioned_files_context:
-                    enhanced_content = f"{content}{mentioned_files_context}"
+                # Build code context with smart clipping for large files
+                if selected_code:
+                    code_context = selected_code
+                elif editor.current_file and editor.text:
+                    lines = editor.text.split('\n')
+                    if len(lines) > 100:
+                        # For large files, extract ~60 lines around cursor
+                        cursor_line, _ = editor.get_cursor_position()
+                        code_context = ContextBuilder.extract_relevant_code(
+                            editor.text, cursor_line, context_lines=30
+                        )
+                        log(f"[APP] Large file ({len(lines)} lines), extracted context around line {cursor_line}")
+                    else:
+                        code_context = editor.text
+                else:
+                    code_context = None
 
                 # Check if this is a code editing command
                 is_code_edit = command in ["apply", "edit"]
@@ -950,7 +954,7 @@ class CliideApp(App[None]):
                     log(f"[APP] Code edit command detected: {command}")
                     full_response = ""
                     async for chunk in self.code_actions.handle_command(
-                        command, enhanced_content, code_context, language
+                        command, content, code_context, language
                     ):
                         full_response += chunk
                         chat.append_ai_chunk(chunk)
@@ -974,7 +978,7 @@ class CliideApp(App[None]):
                     log(f"[APP] Calling handle_command")
                     chunk_count = 0
                     async for chunk in self.code_actions.handle_command(
-                        command, enhanced_content, code_context, language
+                        command, content, code_context, language
                     ):
                         chunk_count += 1
                         chat.append_ai_chunk(chunk)
@@ -984,34 +988,37 @@ class CliideApp(App[None]):
                 # Regular chat with tool-calling agent
                 log("[APP] Handling regular chat with ToolAgent")
                 selected_code = editor.get_selected_text()
+                file_path = str(editor.current_file) if editor.current_file else None
                 file_name = editor.current_file.name if editor.current_file else None
+                language = ContextBuilder._detect_language(file_path) if file_path else None
                 conversation_history = chat.get_conversation_history()
 
-                # If no code is selected but we have an open file, use full file as context
-                code_context = selected_code if selected_code else (editor.text if editor.current_file else None)
-
-                # Note: The prompt already has @mentioned files from chat.send_message()
-                # But we re-extract here for validation/logging
-                enhanced_prompt = event.prompt
-                if mentioned_files_context:
-                    # Check if files are already in prompt (from chat.send_message)
-                    if mentioned_files_context not in event.prompt:
-                        log("[APP] WARNING: Files not in prompt from chat, adding them")
-                        enhanced_prompt = f"{event.prompt}{mentioned_files_context}"
+                # Build code context with smart clipping for large files
+                if selected_code:
+                    code_context = selected_code
+                elif editor.current_file and editor.text:
+                    lines = editor.text.split('\n')
+                    if len(lines) > 100:
+                        # For large files, extract ~60 lines around cursor
+                        cursor_line, _ = editor.get_cursor_position()
+                        code_context = ContextBuilder.extract_relevant_code(
+                            editor.text, cursor_line, context_lines=30
+                        )
+                        log(f"[APP] Large file ({len(lines)} lines), extracted context around line {cursor_line}")
                     else:
-                        log("[APP] Files already in prompt from chat.send_message()")
+                        code_context = editor.text
+                else:
+                    code_context = None
 
-                log(f"[APP] Prompt length: {len(enhanced_prompt)}, has_code={bool(code_context)}, file={file_name}")
+                log(f"[APP] Prompt length: {len(event.prompt)}, has_code={bool(code_context)}, file={file_name}, lang={language}")
                 log(f"[APP] Conversation history has {len(conversation_history)} messages")
-                if conversation_history:
-                    last_msg = conversation_history[-1]
-                    log(f"[APP] Last history message length: {len(last_msg.get('content', ''))}")
 
                 event_count = 0
                 async for agent_event in self.code_actions.chat(
-                    enhanced_prompt,
+                    event.prompt,
                     code_context=code_context,
                     file_name=file_name,
+                    language=language,
                     conversation_history=conversation_history,
                 ):
                     event_count += 1

@@ -265,6 +265,7 @@ Add clear docstrings, comments, and usage examples following {language or 'stand
         user_message: str,
         code_context: Optional[str] = None,
         file_name: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> str:
         """Build prompt for general chat.
 
@@ -272,6 +273,7 @@ Add clear docstrings, comments, and usage examples following {language or 'stand
             user_message: User's message
             code_context: Current code context (optional)
             file_name: Current file name (optional)
+            language: Programming language (optional)
 
         Returns:
             Formatted prompt
@@ -279,10 +281,14 @@ Add clear docstrings, comments, and usage examples following {language or 'stand
         context_parts = []
 
         if file_name:
-            context_parts.append(f"Current file: {file_name}")
+            file_info = f"Current file: {file_name}"
+            if language:
+                file_info += f" ({language})"
+            context_parts.append(file_info)
 
         if code_context:
-            context_parts.append(f"Code context:\n```\n{code_context}\n```")
+            lang_hint = language or ""
+            context_parts.append(f"Code context:\n```{lang_hint}\n{code_context}\n```")
 
         context = "\n\n".join(context_parts)
 
