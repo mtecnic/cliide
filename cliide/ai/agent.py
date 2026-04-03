@@ -329,11 +329,18 @@ class ToolAgent:
                     yield {"type": "done", "reason": "error"}
                     return
 
-                choice = response["choices"][0]
-                message = choice["message"]
+                choices = response["choices"]
+                if not isinstance(choices, list):
+                    log(f"[AGENT] Unexpected choices type: {type(choices)}, value: {choices}")
+                    yield {"type": "error", "message": f"Invalid API response: choices is {type(choices).__name__}, not list"}
+                    yield {"type": "done", "reason": "error"}
+                    return
+
+                choice = choices[0]
+                message = choice.get("message", {}) if isinstance(choice, dict) else {}
 
                 # Check for tool calls
-                tool_calls = message.get("tool_calls", [])
+                tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
 
                 if not tool_calls:
                     # No tool calls, return the assistant's message
@@ -755,12 +762,18 @@ Work autonomously but report significant progress. Stop when the task is complet
                     yield {"type": "error", "message": "No response from AI"}
                     return
 
-                choice = response["choices"][0]
-                message = choice["message"]
-                tool_calls = message.get("tool_calls", [])
+                choices = response["choices"]
+                if not isinstance(choices, list):
+                    log(f"[AGENT] Legacy run: Unexpected choices type: {type(choices)}")
+                    yield {"type": "error", "message": f"Invalid API response: choices is {type(choices).__name__}"}
+                    return
+
+                choice = choices[0]
+                message = choice.get("message", {}) if isinstance(choice, dict) else {}
+                tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
 
                 # Check finish reason
-                finish_reason = choice.get("finish_reason", "")
+                finish_reason = choice.get("finish_reason", "") if isinstance(choice, dict) else ""
 
                 if not tool_calls:
                     # No tool calls - AI has finished or is responding
