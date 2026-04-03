@@ -31,7 +31,7 @@ pip install cliide
 ### Install from source
 
 ```bash
-git clone https://github.com/yourusername/cliide.git
+git clone https://github.com/mtecnic/cliide.git
 cd cliide
 pip install -e .
 ```
@@ -40,7 +40,7 @@ pip install -e .
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/cliide.git
+git clone https://github.com/mtecnic/cliide.git
 cd cliide
 
 # Install with dev dependencies
@@ -176,27 +176,14 @@ export CLIIDE_EDITOR__THEME="monokai"
 
 For full IDE features, install language servers:
 
-### Python
-
 ```bash
-npm install -g pyright
-```
+# Python & TypeScript (most common)
+npm install -g pyright typescript-language-server typescript
 
-### JavaScript/TypeScript
-
-```bash
-npm install -g typescript-language-server typescript
-```
-
-### Rust
-
-```bash
+# Rust
 rustup component add rust-analyzer
-```
 
-### Go
-
-```bash
+# Go
 go install golang.org/x/tools/gopls@latest
 ```
 
@@ -290,9 +277,9 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Support
 
-- 📖 [Documentation](https://github.com/yourusername/cliide/docs)
-- 🐛 [Issue Tracker](https://github.com/yourusername/cliide/issues)
-- 💬 [Discussions](https://github.com/yourusername/cliide/discussions)
+- 📖 [Documentation](https://github.com/mtecnic/cliide/docs)
+- 🐛 [Issue Tracker](https://github.com/mtecnic/cliide/issues)
+- 💬 [Discussions](https://github.com/mtecnic/cliide/discussions)
 
 ---
 
