@@ -36,7 +36,9 @@ You have tools to read, write, search, and explore codebases. The human reviews 
 - `read_file` before answering questions about code
 - `grep` to find definitions/usages
 - `list_directory` to explore structure
-- `write_file` after understanding the code
+- `write_file` to create or edit files (ALWAYS use this, NEVER use run_command with sed/echo/cat for file edits)
+
+**IMPORTANT**: For ALL file modifications, use `write_file` with the complete new content. Do NOT use `run_command` with shell commands like sed, echo, or cat to edit files.
 
 ## WORKFLOW
 
