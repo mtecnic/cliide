@@ -168,6 +168,23 @@ class CodeActions:
         system_prompt = self.prompt_manager.get_system_prompt("agent")
         messages.append({"role": "system", "content": system_prompt})
 
+        # Add current file context as system message so AI knows what's open in the viewer
+        if file_name or code_context:
+            context_parts = []
+            if file_name:
+                file_info = f"Currently open in editor: {file_name}"
+                if language:
+                    file_info += f" ({language})"
+                context_parts.append(file_info)
+            if code_context:
+                lang_hint = language or ""
+                # Truncate very long contexts
+                ctx = code_context[:2000] if len(code_context) > 2000 else code_context
+                context_parts.append(f"File content:\n```{lang_hint}\n{ctx}\n```")
+            editor_context = "\n".join(context_parts)
+            messages.append({"role": "system", "content": editor_context})
+            log(f"[CODE_ACTIONS] Added editor context: {file_name}, {len(code_context or '')} chars")
+
         # Add conversation history (already includes current message from chat panel)
         if conversation_history:
             log(f"[CODE_ACTIONS] Using conversation history with {len(conversation_history)} messages")
