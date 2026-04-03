@@ -258,9 +258,14 @@ Available tools: {', '.join(allowed_tools)}
                     if not response.get("choices"):
                         break
 
-                    choice = response["choices"][0]
-                    message = choice["message"]
-                    tool_calls = message.get("tool_calls", [])
+                    choices = response["choices"]
+                    if not isinstance(choices, list):
+                        log(f"[SUB_AGENT] Unexpected choices type: {type(choices)}, value: {choices}")
+                        raise TypeError(f"Expected list for choices, got {type(choices).__name__}")
+
+                    choice = choices[0]
+                    message = choice.get("message", {}) if isinstance(choice, dict) else choice
+                    tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
 
                     # No tool calls - we have the final answer
                     if not tool_calls:
