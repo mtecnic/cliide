@@ -941,20 +941,12 @@ class CliideApp(App[None]):
                 file_path = str(editor.current_file) if editor.current_file else None
                 language = self.code_actions.context_builder._detect_language(file_path) if file_path else None
 
-                # Build code context with smart clipping for large files
+                # Build code context - send full file (local VLLM has flexible context)
                 if selected_code:
                     code_context = selected_code
                 elif editor.current_file and editor.text:
-                    lines = editor.text.split('\n')
-                    if len(lines) > 100:
-                        # For large files, extract ~60 lines around cursor
-                        cursor_line, _ = editor.get_cursor_position()
-                        code_context = ContextBuilder.extract_relevant_code(
-                            editor.text, cursor_line, context_lines=30
-                        )
-                        log(f"[APP] Large file ({len(lines)} lines), extracted context around line {cursor_line}")
-                    else:
-                        code_context = editor.text
+                    code_context = editor.text
+                    log(f"[APP] Sending full file: {len(editor.text)} chars, {len(editor.text.splitlines())} lines")
                 else:
                     code_context = None
 
@@ -1005,20 +997,12 @@ class CliideApp(App[None]):
                 language = ContextBuilder._detect_language(file_path) if file_path else None
                 conversation_history = chat.get_conversation_history()
 
-                # Build code context with smart clipping for large files
+                # Build code context - send full file (local VLLM has flexible context)
                 if selected_code:
                     code_context = selected_code
                 elif editor.current_file and editor.text:
-                    lines = editor.text.split('\n')
-                    if len(lines) > 100:
-                        # For large files, extract ~60 lines around cursor
-                        cursor_line, _ = editor.get_cursor_position()
-                        code_context = ContextBuilder.extract_relevant_code(
-                            editor.text, cursor_line, context_lines=30
-                        )
-                        log(f"[APP] Large file ({len(lines)} lines), extracted context around line {cursor_line}")
-                    else:
-                        code_context = editor.text
+                    code_context = editor.text
+                    log(f"[APP] Sending full file: {len(editor.text)} chars, {len(editor.text.splitlines())} lines")
                 else:
                     code_context = None
 

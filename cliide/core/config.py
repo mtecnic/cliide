@@ -79,8 +79,8 @@ class UIConfig(BaseModel):
 class ContextConfig(BaseModel):
     """Context management configuration."""
 
-    max_file_tokens: int = Field(default=8000, ge=1000, description="Maximum tokens per file read")
-    max_context_tokens: int = Field(default=32000, ge=4000, description="Total context budget for conversations")
+    max_file_tokens: int = Field(default=32000, ge=1000, description="Maximum tokens per file read (higher for local VLLM)")
+    max_context_tokens: int = Field(default=64000, ge=4000, description="Total context budget for conversations")
     search_context_lines: int = Field(default=5, ge=1, le=20, description="Lines of context before/after search matches")
 
 

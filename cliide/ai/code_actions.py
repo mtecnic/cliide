@@ -178,9 +178,8 @@ class CodeActions:
                 context_parts.append(file_info)
             if code_context:
                 lang_hint = language or ""
-                # Truncate very long contexts
-                ctx = code_context[:2000] if len(code_context) > 2000 else code_context
-                context_parts.append(f"File content:\n```{lang_hint}\n{ctx}\n```")
+                # Send full file content (local VLLM has flexible context)
+                context_parts.append(f"File content:\n```{lang_hint}\n{code_context}\n```")
             editor_context = "\n".join(context_parts)
             messages.append({"role": "system", "content": editor_context})
             log(f"[CODE_ACTIONS] Added editor context: {file_name}, {len(code_context or '')} chars")
