@@ -161,11 +161,13 @@ class ToolAgent:
         ))
 
         # Sub-agent tools (for parallel task execution)
+        # Use inference concurrency limit for sub-agents too
+        inference_max = self.config.inference.max_concurrent_requests
         self.sub_agent_manager = SubAgentManager(
             vllm_client=self.client,
             workspace_root=self.workspace_root,
             tool_registry=self.registry,
-            max_concurrent=3,
+            max_concurrent=inference_max,
         )
         self.registry.register(SpawnAgentTool(self.sub_agent_manager))
         self.registry.register(ListAgentsTool(self.sub_agent_manager))
@@ -183,9 +185,10 @@ class ToolAgent:
 
         # Initialize tool worker pool for async execution
         worker_config = self.config.tool_worker
+        inference_config = self.config.inference
         self.worker_pool = ToolWorkerPool(
             tool_registry=self.registry,
-            max_concurrent=worker_config.max_concurrent,
+            max_concurrent=inference_config.max_concurrent_requests,
             timeout_seconds=worker_config.timeout_seconds,
             confirmation_mode=config.confirmation_mode,
         )
