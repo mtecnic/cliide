@@ -1156,6 +1156,9 @@ class ChatPanel(Widget):
             position: Cursor position to set
         """
         from cliide.utils.logger import log
+        if input_widget is None:
+            log("[CHAT] _set_cursor_end called with None input_widget")
+            return
         input_widget.cursor_position = position
         # Also clear any selection by setting cursor blink to visible
         input_widget.action_cursor_right()
@@ -1189,11 +1192,18 @@ class ChatPanel(Widget):
         log(f"[CHAT] Extracted file mentions from message: {file_mentions}")
         file_contents: dict[str, str] = {}
 
+        MAX_FILE_SIZE = 100_000  # 100KB limit for @mentioned files
+
         for file_path in file_mentions:
             full_path = self.workspace_path / file_path
             log(f"[CHAT] Checking file: {full_path}, exists: {full_path.exists()}, is_file: {full_path.is_file() if full_path.exists() else False}")
             if full_path.exists() and full_path.is_file():
                 try:
+                    file_size = full_path.stat().st_size
+                    if file_size > MAX_FILE_SIZE:
+                        file_contents[file_path] = f"[File too large: {file_size:,} bytes. Max: {MAX_FILE_SIZE:,} bytes]"
+                        log(f"[CHAT] File {file_path} too large: {file_size} bytes")
+                        continue
                     content = full_path.read_text(encoding="utf-8")
                     file_contents[file_path] = content
                     log(f"[CHAT] Successfully read file {file_path}, length: {len(content)}")

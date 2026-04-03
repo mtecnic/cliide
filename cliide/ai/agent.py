@@ -342,13 +342,24 @@ class ToolAgent:
                     return
 
                 # Check for repetitive tool patterns (infinite loop detection)
-                # Only trigger if same exact pattern appears 3+ times consecutively
                 tool_pattern = tuple(sorted(tc["function"]["name"] for tc in tool_calls))
                 recent_tool_patterns.append(tool_pattern)
-                if len(recent_tool_patterns) >= 3 and all(p == tool_pattern for p in recent_tool_patterns):
+
+                # Detect exact 3x repeat
+                if len(recent_tool_patterns) >= 3 and all(p == tool_pattern for p in recent_tool_patterns[-3:]):
                     yield {"type": "warning", "message": f"Detected repetitive tool pattern (3x): {tool_pattern}"}
                     yield {"type": "done", "reason": "loop_detected"}
                     return
+
+                # Detect alternating A,B,A,B,A,B pattern (6 iterations)
+                if len(recent_tool_patterns) >= 6:
+                    last_6 = recent_tool_patterns[-6:]
+                    if (last_6[0] == last_6[2] == last_6[4] and
+                        last_6[1] == last_6[3] == last_6[5] and
+                        last_6[0] != last_6[1]):
+                        yield {"type": "warning", "message": f"Detected alternating tool loop: {last_6[0]} <-> {last_6[1]}"}
+                        yield {"type": "done", "reason": "loop_detected"}
+                        return
 
                 # Process tool calls with adaptive batching based on concurrency limits
                 # and tool classification (sequential vs parallel-safe)
@@ -511,7 +522,8 @@ class ToolAgent:
                         result = info["result"]
                         args = info["args"]
                     else:
-                        # Should not happen, but handle gracefully
+                        # Should not happen - log warning to help debug concurrency issues
+                        log(f"[AGENT] WARNING: No result for tool_call_id={tool_call_id}, tool={tool_name}")
                         from cliide.ai.tools.base import ToolResult
                         result = ToolResult(success=False, error="No result found")
                         args = {}

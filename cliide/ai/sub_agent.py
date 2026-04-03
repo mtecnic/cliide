@@ -91,6 +91,7 @@ class SubAgentManager:
         self._tasks: dict[str, SubAgentTask] = {}
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._tasks_lock = asyncio.Lock()  # Protects _tasks from concurrent access
 
     @property
     def max_concurrent(self) -> int:
@@ -99,9 +100,11 @@ class SubAgentManager:
 
     @max_concurrent.setter
     def max_concurrent(self, value: int) -> None:
-        """Set max concurrent and recreate semaphore."""
+        """Set max concurrent (takes effect on next spawn, not in-flight tasks)."""
+        from cliide.utils.logger import log
+        log(f"[SUBAGENT] max_concurrent changed to {value} (takes effect on restart)")
         self._max_concurrent = value
-        self._semaphore = asyncio.Semaphore(value)
+        # Don't recreate semaphore - would orphan in-flight tasks
 
     async def spawn(
         self,
@@ -349,10 +352,16 @@ Available tools: {', '.join(allowed_tools)}
                                     })
                                     continue
 
-                        # Execute tool
-                        result = await self.tool_registry.execute_tool(
-                            tool_name, args, confirmation_mode="auto"
-                        )
+                        # Execute tool with error recovery
+                        try:
+                            result = await self.tool_registry.execute_tool(
+                                tool_name, args, confirmation_mode="auto"
+                            )
+                        except Exception as e:
+                            # Per-tool error recovery - don't crash the whole agent
+                            log(f"[SUBAGENT] Tool {tool_name} failed: {e}")
+                            from cliide.ai.tools.base import ToolResult
+                            result = ToolResult(success=False, error=f"Tool execution failed: {e}")
 
                         result_msg = result.to_message()
                         tool_results.append({
@@ -437,19 +446,20 @@ Available tools: {', '.join(allowed_tools)}
                 if task_id in self._running_tasks:
                     del self._running_tasks[task_id]
                 # Clean up old completed tasks to prevent memory leak
-                self._cleanup_old_tasks()
+                await self._cleanup_old_tasks()
 
-    def _cleanup_old_tasks(self, max_completed: int = 50) -> None:
+    async def _cleanup_old_tasks(self, max_completed: int = 50) -> None:
         """Remove old completed tasks to prevent memory leak."""
-        completed_tasks = [
-            (tid, task) for tid, task in self._tasks.items()
-            if task.status in [SubAgentStatus.COMPLETED, SubAgentStatus.FAILED]
-        ]
-        if len(completed_tasks) > max_completed:
-            # Sort by completion time, remove oldest
-            completed_tasks.sort(key=lambda x: x[1].completed_at or x[1].started_at or 0)
-            for tid, _ in completed_tasks[:-max_completed]:
-                del self._tasks[tid]
+        async with self._tasks_lock:
+            completed_tasks = [
+                (tid, task) for tid, task in self._tasks.items()
+                if task.status in [SubAgentStatus.COMPLETED, SubAgentStatus.FAILED]
+            ]
+            if len(completed_tasks) > max_completed:
+                # Sort by completion time, remove oldest
+                completed_tasks.sort(key=lambda x: x[1].completed_at or x[1].started_at or 0)
+                for tid, _ in completed_tasks[:-max_completed]:
+                    del self._tasks[tid]
 
     async def check_status(self, task_id: str) -> dict[str, Any] | None:
         """Check sub-agent status.
