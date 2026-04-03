@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from collections import deque
 from typing import Any, AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -301,7 +300,7 @@ class ToolAgent:
 
         iteration = 0
         current_messages = messages.copy()
-        recent_tool_patterns: deque[tuple[str, ...]] = deque(maxlen=3)
+        recent_tool_patterns: list[tuple[str, ...]] = []  # Changed from deque - deque doesn't support slicing
 
         while iteration < max_iterations:
             iteration += 1
@@ -353,6 +352,9 @@ class ToolAgent:
                 # Check for repetitive tool patterns (infinite loop detection)
                 tool_pattern = tuple(sorted(tc["function"]["name"] for tc in tool_calls))
                 recent_tool_patterns.append(tool_pattern)
+                # Keep only last 6 patterns (enough to detect 3x repeat or A,B,A,B,A,B)
+                if len(recent_tool_patterns) > 6:
+                    recent_tool_patterns = recent_tool_patterns[-6:]
 
                 # Detect exact 3x repeat
                 if len(recent_tool_patterns) >= 3 and all(p == tool_pattern for p in recent_tool_patterns[-3:]):
