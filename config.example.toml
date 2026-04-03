@@ -32,6 +32,13 @@ max_concurrent_requests = 2
 # Enable batching of tool calls when they exceed max_concurrent
 batch_tool_calls = true
 
+[context]
+# Maximum tokens per file read (increase for models with larger context)
+max_file_tokens = 32000
+
+# Total context budget for conversations
+max_context_tokens = 64000
+
 [editor]
 # Color theme (monokai, dracula, github, etc.)
 theme = "monokai"

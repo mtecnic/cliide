@@ -103,9 +103,11 @@ class ToolAgent:
         config = self.config.tools
 
         # Filesystem tools
+        context_config = self.config.context
         self.registry.register(ReadFileTool(
             self.workspace_root,
-            max_file_size_mb=config.max_file_size_mb
+            max_file_size_mb=config.max_file_size_mb,
+            max_context_tokens=context_config.max_file_tokens
         ))
         self.registry.register(WriteFileTool(
             self.workspace_root,
