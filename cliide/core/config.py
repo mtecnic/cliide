@@ -125,17 +125,38 @@ class SubAgentConfig(BaseModel):
         default="read_only",
         description="Default trust level for sub-agents: 'read_only', 'write_safe', 'write_all', 'full'"
     )
-    max_concurrent: int = Field(default=10, ge=1, le=20, description="Maximum concurrent sub-agents")
     auto_approve_reads: bool = Field(default=True, description="Auto-approve read operations for sub-agents")
     milestone_interval: int = Field(default=3, ge=1, description="Emit milestone events every N iterations")
+    allow_nested_spawn: bool = Field(default=False, description="Allow sub-agents to spawn their own sub-agents (not recommended)")
 
 
 class ToolWorkerConfig(BaseModel):
     """Tool worker pool configuration for async tool delegation."""
 
     enabled: bool = Field(default=True, description="Enable tool worker delegation (tools run in parallel)")
-    max_concurrent: int = Field(default=10, ge=1, le=50, description="Maximum parallel tool workers")
     timeout_seconds: int = Field(default=60, ge=1, le=300, description="Per-tool execution timeout in seconds")
+
+
+class InferenceConfig(BaseModel):
+    """Inference server configuration for concurrency control.
+
+    Adjust max_concurrent_requests based on your hardware:
+    - 8GB VRAM (RTX 3070, etc): 1 (sequential)
+    - 16GB VRAM (RTX 4080, etc): 2-4 (light parallelism)
+    - 24GB+ VRAM (RTX 4090, A100): 8 (full parallel)
+    - Cloud/API (OpenAI, etc): 16 (high concurrency)
+    """
+
+    max_concurrent_requests: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Max concurrent requests to inference server (adjust based on GPU VRAM)"
+    )
+    batch_tool_calls: bool = Field(
+        default=True,
+        description="Batch tool calls when they exceed max_concurrent_requests"
+    )
 
 
 class Config(BaseSettings):
@@ -158,6 +179,7 @@ class Config(BaseSettings):
     subagent: SubAgentConfig = Field(default_factory=SubAgentConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     tool_worker: ToolWorkerConfig = Field(default_factory=ToolWorkerConfig)
+    inference: InferenceConfig = Field(default_factory=InferenceConfig)
 
     @classmethod
     def load_from_file(cls, config_path: Path | None = None) -> "Config":

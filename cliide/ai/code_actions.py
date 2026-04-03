@@ -242,11 +242,11 @@ class CodeActions:
             yield {"type": "error", "message": "Sub-agent manager not initialized"}
             return
 
-        # Temporarily increase concurrency for exploration
-        old_max = manager.max_concurrent
-        manager.max_concurrent = 10
+        # Use configured concurrency limit (respects user's hardware)
+        config = get_config()
+        max_concurrent = config.inference.max_concurrent_requests
 
-        yield {"type": "text", "content": "Launching parallel exploration agents...\n\n"}
+        yield {"type": "text", "content": f"Launching exploration agents (max {max_concurrent} parallel)...\n\n"}
 
         try:
             # Define exploration tasks based on workspace structure
@@ -258,13 +258,18 @@ class CodeActions:
                 "Identify the project type, frameworks used, and entry points",
             ]
 
-            # Spawn all agents in parallel
-            log(f"[EXPLORE] Spawning {len(exploration_tasks)} sub-agents in parallel")
-            spawn_coros = [
-                manager.spawn(task, max_iterations=15)
-                for task in exploration_tasks
-            ]
-            task_ids = await asyncio.gather(*spawn_coros)
+            # Spawn agents in batches respecting concurrency limit
+            log(f"[EXPLORE] Spawning {len(exploration_tasks)} sub-agents (max_concurrent={max_concurrent})")
+            task_ids = []
+            for i in range(0, len(exploration_tasks), max_concurrent):
+                batch = exploration_tasks[i:i + max_concurrent]
+                log(f"[EXPLORE] Spawning batch {i//max_concurrent + 1}: {len(batch)} agents")
+                spawn_coros = [
+                    manager.spawn(task, max_iterations=15)
+                    for task in batch
+                ]
+                batch_ids = await asyncio.gather(*spawn_coros)
+                task_ids.extend(batch_ids)
 
             yield {"type": "text", "content": f"Spawned {len(task_ids)} exploration agents. Waiting for results...\n\n"}
 
@@ -320,8 +325,8 @@ Structure your response with:
                 yield {"type": "done", "reason": "error"}
 
         finally:
-            # Restore original concurrency limit
-            manager.max_concurrent = old_max
+            # Cleanup handled by sub-agent manager
+            pass
 
     async def apply_code_change(
         self, instruction: str, code: str, language: Optional[str] = None
