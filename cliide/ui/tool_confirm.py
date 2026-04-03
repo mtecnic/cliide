@@ -15,6 +15,7 @@ class ToolConfirmationDialog(ModalScreen):
     BINDINGS = [
         Binding("y", "approve", "Approve", show=True),
         Binding("n", "deny", "Deny", show=True),
+        Binding("a", "auto_session", "Auto-approve session", show=True),
         Binding("escape", "deny", "Cancel", show=False),
     ]
 
@@ -77,6 +78,10 @@ class ToolConfirmationDialog(ModalScreen):
     .deny {
         background: $error;
     }
+
+    .auto {
+        background: $primary;
+    }
     """
 
     def __init__(self, tool_name: str, args: dict, description: str | None = None):
@@ -125,6 +130,7 @@ class ToolConfirmationDialog(ModalScreen):
             # Buttons
             with Horizontal(id="buttons"):
                 yield Button("Approve (Y)", variant="success", classes="approve", id="approve")
+                yield Button("Auto (A)", variant="primary", classes="auto", id="auto")
                 yield Button("Deny (N)", variant="error", classes="deny", id="deny")
 
     def action_approve(self) -> None:
@@ -141,9 +147,18 @@ class ToolConfirmationDialog(ModalScreen):
             self.post_message(ToolConfirmationResult(approved=False, tool_name=self.tool_name))
             self.dismiss(False)
 
+    def action_auto_session(self) -> None:
+        """Approve and enable auto-approve for rest of session."""
+        if not self.result_posted:
+            self.result_posted = True
+            self.post_message(ToolConfirmationResult(approved=True, tool_name=self.tool_name, auto_session=True))
+            self.dismiss(True)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press."""
         if event.button.id == "approve":
             self.action_approve()
+        elif event.button.id == "auto":
+            self.action_auto_session()
         elif event.button.id == "deny":
             self.action_deny()
