@@ -1,0 +1,113 @@
+# Example cliide configuration file
+# Copy this to ~/.config/cliide/config.toml or .cliide.toml in your project
+
+[vllm]
+# VLLM API endpoint
+base_url = "http://localhost:8000/v1"
+
+# Model to use
+model = "deepseek-coder-33b-instruct"
+
+# Temperature for generation (0.0 = deterministic, 2.0 = very random)
+temperature = 0.2
+
+# Maximum tokens to generate
+max_tokens = 2048
+
+# Enable streaming responses
+streaming = true
+
+# Request timeout in seconds
+timeout = 60
+
+[editor]
+# Color theme (monokai, dracula, github, etc.)
+theme = "monokai"
+
+# Tab size (number of spaces)
+tab_size = 4
+
+# Show line numbers
+line_numbers = true
+
+# Auto-save files
+auto_save = false
+
+# Auto-save delay in seconds
+auto_save_delay = 2
+
+# Enable word wrap
+word_wrap = false
+
+# Show whitespace characters
+show_whitespace = false
+
+[lsp]
+# Enable LSP support
+enabled = true
+
+# Language server commands
+[lsp.servers]
+python = "pyright-langserver --stdio"
+rust = "rust-analyzer"
+javascript = "typescript-language-server --stdio"
+typescript = "typescript-language-server --stdio"
+go = "gopls"
+java = "jdtls"
+c = "clangd"
+cpp = "clangd"
+
+[keybindings]
+# Command palette
+command_palette = "ctrl+p"
+
+# AI chat toggle
+ai_chat = "ctrl+k"
+
+# Explain selected code
+explain_code = "ctrl+e"
+
+# Save file
+save_file = "ctrl+s"
+
+# Quit application
+quit = "ctrl+q"
+
+# Find in file
+find = "ctrl+f"
+
+[ui]
+# Show file tree on startup
+show_file_tree = true
+
+# Show chat panel on startup
+show_chat_panel = true
+
+# File tree width (in columns)
+file_tree_width = 30
+
+# Chat panel width (in columns)
+chat_panel_width = 40
+
+[tools]
+# Enable AI tool calling (file operations, code search, etc.)
+enabled = true
+
+# Confirmation mode for tool execution:
+# - "auto": AI calls tools automatically, no confirmation
+# - "dangerous": Confirm only write/delete operations (RECOMMENDED)
+# - "all": Confirm every tool call
+confirmation_mode = "dangerous"
+
+# Timeout for tool operations in seconds
+timeout_seconds = 30
+
+# Maximum file size for read/write operations in megabytes
+max_file_size_mb = 10.0
+
+# Restrict file operations to workspace directory only
+workspace_only = true
+
+# Enable audit logging of tool executions
+# Logs are saved to ~/.config/cliide/audit.log
+audit_log_enabled = true
