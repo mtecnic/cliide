@@ -16,7 +16,7 @@ from cliide.ai.context_builder import ContextBuilder
 from cliide.ai.event_bus import AgentEvent, AgentEventType, get_event_bus
 from cliide.ai.prompt_manager import PromptManager
 from cliide.core.config import Config, get_config
-from cliide.core.events import AIRequestStarted, CommandExecuted, FileOpened
+from cliide.core.events import AIRequestStarted, CommandExecuted, FileOpened, ToolConfirmationResult
 from cliide.core.recent_projects import RecentProjectsManager
 from cliide.core.session import SessionManager, SessionState
 from cliide.lsp.manager import LanguageServerManager
@@ -144,6 +144,7 @@ class CliideApp(App[None]):
         self.lsp_manager = LanguageServerManager(self.project_path)
         self.problems_panel_visible = False
         self.pending_code_edit: dict[str, Any] | None = None  # Track code editing in progress
+        self.auto_approve_session = False  # When True, skip all tool confirmations
 
         # Session and recent projects management
         self.session_manager = SessionManager(self.project_path)
@@ -470,6 +471,11 @@ class CliideApp(App[None]):
         Returns:
             True if user approves, False otherwise
         """
+        # Skip confirmation if auto-approve is enabled for this session
+        if self.auto_approve_session:
+            log(f"[APP] Auto-approving tool: {tool_name}")
+            return True
+
         from cliide.ui.tool_confirm import ToolConfirmationDialog
         import asyncio
 
@@ -488,6 +494,12 @@ class CliideApp(App[None]):
         result = await confirmation_future
 
         return result
+
+    def on_tool_confirmation_result(self, event: ToolConfirmationResult) -> None:
+        """Handle tool confirmation result to check for auto-session flag."""
+        if event.auto_session:
+            log("[APP] Auto-approve enabled for this session")
+            self.auto_approve_session = True
 
     async def _reload_vllm_client(self) -> None:
         """Reload VLLM client with new configuration."""

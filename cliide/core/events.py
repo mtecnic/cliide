@@ -97,7 +97,8 @@ class ToolConfirmationResult(Message):
 
     bubble = True
 
-    def __init__(self, approved: bool, tool_name: str) -> None:
+    def __init__(self, approved: bool, tool_name: str, auto_session: bool = False) -> None:
         super().__init__()
         self.approved = approved
         self.tool_name = tool_name
+        self.auto_session = auto_session  # If True, auto-approve all future tools this session
