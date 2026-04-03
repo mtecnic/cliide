@@ -207,9 +207,11 @@ class CodeActions:
             messages.append({"role": "user", "content": user_prompt})
 
         # Check for exploration-type requests that benefit from parallel sub-agents
+        # Note: "what is this" removed - it's usually about current file, not project exploration
         exploration_keywords = [
-            "scan", "summarize", "explore", "overview", "structure",
-            "project", "codebase", "all files", "directory", "what is this"
+            "scan the project", "summarize the project", "explore the codebase",
+            "project overview", "project structure", "codebase structure",
+            "all files in", "directory structure"
         ]
         is_exploration = any(kw in message.lower() for kw in exploration_keywords)
 
