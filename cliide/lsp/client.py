@@ -524,3 +524,42 @@ class AsyncLSPClient:
 
         result = await self._send_request("textDocument/rename", params)
         return result
+
+    async def hover(self, file_path: str, line: int, character: int) -> Optional[dict[str, Any]]:
+        """Request hover information for a position.
+
+        Args:
+            file_path: File path
+            line: Line number (0-indexed)
+            character: Character offset (0-indexed)
+
+        Returns:
+            Hover result containing contents and optional range
+        """
+        from lsprotocol.types import HoverParams, Position, TextDocumentIdentifier
+
+        params = HoverParams(
+            text_document=TextDocumentIdentifier(uri=path_to_uri(file_path)),
+            position=Position(line=line, character=character),
+        )
+
+        result = await self._send_request("textDocument/hover", params)
+        return result if isinstance(result, dict) else None
+
+    async def document_symbols(self, file_path: str) -> Optional[list[Any]]:
+        """Request document symbols (outline).
+
+        Args:
+            file_path: File path
+
+        Returns:
+            List of document symbols
+        """
+        from lsprotocol.types import DocumentSymbolParams, TextDocumentIdentifier
+
+        params = DocumentSymbolParams(
+            text_document=TextDocumentIdentifier(uri=path_to_uri(file_path)),
+        )
+
+        result = await self._send_request("textDocument/documentSymbol", params)
+        return result if isinstance(result, list) else None

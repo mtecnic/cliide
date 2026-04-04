@@ -9,7 +9,7 @@ import click
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
-from textual.widgets import Footer, Header
+from textual.widgets import Footer, Header, Input
 
 from cliide.ai.code_actions import CodeActions
 from cliide.ai.context_builder import ContextBuilder
@@ -38,6 +38,10 @@ from cliide.ui.statusbar import StatusBar
 from cliide.ui.tab_bar import TabBar
 from cliide.ui.agent_status import TabbedAgentPanel
 from cliide.ui.splitter import Splitter, HorizontalSplitter
+from cliide.ui.symbol_search import SymbolSearchPanel
+from cliide.ui.project_search import ProjectSearchPanel
+from cliide.ui.terminal import TerminalPanel
+from cliide.ui.tooltip import parse_hover_content
 from cliide.utils.logger import log
 
 
@@ -113,23 +117,29 @@ class CliideApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("ctrl+q", "quit", "Quit", show=True),
-        Binding("ctrl+p", "command_palette", "Command Palette", show=True),
-        Binding("ctrl+o", "switch_project", "Switch Project", show=True),
+        # Shown in footer (keep minimal)
+        Binding("ctrl+p", "command_palette", "Commands", show=True),
         Binding("ctrl+s", "save_file", "Save", show=True),
-        Binding("ctrl+k", "toggle_chat", "AI Chat", show=True),
-        Binding("ctrl+j", "toggle_agents", "Agents", show=True),
-        Binding("ctrl+e", "explain_code", "Explain Code", show=True),
-        Binding("ctrl+b", "toggle_file_tree", "Toggle File Tree", show=True),
-        Binding("ctrl+comma", "vllm_settings", "Settings", show=True),
+        Binding("ctrl+k", "toggle_chat", "Chat", show=True),
+        Binding("ctrl+grave_accent", "toggle_terminal", "Term", show=True),
+        Binding("ctrl+q", "quit", "Quit", show=True),
+        # Hidden (use Ctrl+P to discover)
+        Binding("ctrl+o", "switch_project", "Switch Project", show=False),
+        Binding("ctrl+j", "toggle_agents", "Agents", show=False),
+        Binding("ctrl+e", "explain_code", "Explain Code", show=False),
+        Binding("ctrl+b", "toggle_file_tree", "Toggle File Tree", show=False),
+        Binding("ctrl+comma", "vllm_settings", "Settings", show=False),
         Binding("ctrl+space", "trigger_completion", "Completion", show=False),
         Binding("ctrl+shift+n", "new_chat", "New Chat", show=False),
         Binding("f12", "goto_definition", "Go to Definition", show=False),
         Binding("shift+f12", "find_references", "Find References", show=False),
         Binding("f2", "rename_symbol", "Rename", show=False),
-        Binding("ctrl+shift+m", "toggle_problems", "Problems", show=True),
-        Binding("ctrl+f", "find_replace", "Find & Replace", show=True),
-        Binding("ctrl+shift+f", "format_code", "Format Code", show=True),
+        Binding("ctrl+shift+m", "toggle_problems", "Problems", show=False),
+        Binding("ctrl+f", "find_replace", "Find & Replace", show=False),
+        Binding("ctrl+shift+f", "workspace_search", "Find in Files", show=False),
+        Binding("ctrl+shift+o", "symbol_search", "Go to Symbol", show=False),
+        Binding("ctrl+i", "info_at_cursor", "Info", show=False),
+        Binding("alt+shift+f", "format_code", "Format Code", show=False),
     ]
 
     def __init__(self, project_path: Path | None = None, **kwargs: Any) -> None:
@@ -197,6 +207,9 @@ class CliideApp(App[None]):
             with Container(id="chat-container"):
                 yield ChatPanel(workspace_path=self.project_path)
 
+        # Terminal panel (starts hidden, toggle with Ctrl+`)
+        yield TerminalPanel(id="terminal-panel", classes="hidden")
+
         yield StatusBar()
         yield Footer()
 
@@ -227,7 +240,30 @@ class CliideApp(App[None]):
         if not self.config.ui.show_chat_panel:
             self.query_one("#chat-container").add_class("hidden")
 
-        # Check AI connection
+        # Check AI connection in background (don't block startup)
+        statusbar = self.query_one(StatusBar)
+        statusbar.update_ai_status("Connecting...")
+        self.run_worker(self._check_ai_connection())
+
+        # Connect editor to LSP manager
+        editor = self.query_one(EditorWidget)
+        editor.lsp_manager = self.lsp_manager
+
+        # Register diagnostic handler
+        self.lsp_manager.register_diagnostic_handler(self._handle_diagnostics)
+
+        # Set terminal working directory
+        terminal = self.query_one(TerminalPanel)
+        terminal._cwd = self.project_path
+
+        # Add to recent projects
+        self.recent_projects.add(self.project_path)
+
+        # Restore session
+        self._restore_session()
+
+    async def _check_ai_connection(self) -> None:
+        """Check AI connection in background and update status."""
         statusbar = self.query_one(StatusBar)
         try:
             connected = await self.code_actions.client.check_connection()
@@ -237,19 +273,6 @@ class CliideApp(App[None]):
                 statusbar.update_ai_status("Disconnected")
         except Exception:
             statusbar.update_ai_status("Disconnected")
-
-        # Connect editor to LSP manager
-        editor = self.query_one(EditorWidget)
-        editor.lsp_manager = self.lsp_manager
-
-        # Register diagnostic handler
-        self.lsp_manager.register_diagnostic_handler(self._handle_diagnostics)
-
-        # Add to recent projects
-        self.recent_projects.add(self.project_path)
-
-        # Restore session
-        self._restore_session()
 
     def _show_startup_picker(self) -> None:
         """Show project picker on startup when no path given."""
@@ -385,20 +408,60 @@ class CliideApp(App[None]):
             log("[APP] No session to restore")
             return
 
-        # Restore tabs
-        for file_path in state.open_files:
-            if Path(file_path).exists():
-                try:
-                    self._open_file_internal(file_path, activate=False)
-                except Exception as e:
-                    log(f"[APP] Error restoring tab {file_path}: {e}")
+        # Restore all tabs in parallel using a background worker
+        self.run_worker(self._restore_session_async(state))
 
-        # Activate last active file
-        if state.active_file and Path(state.active_file).exists():
+    async def _restore_session_async(self, state: SessionState) -> None:
+        """Restore session state asynchronously (parallel file loading)."""
+        import aiofiles
+        import asyncio
+
+        # Filter to existing files
+        files_to_restore = [f for f in state.open_files if Path(f).exists()]
+
+        if not files_to_restore:
+            log("[APP] No files to restore")
+            return
+
+        async def load_file(file_path: str) -> tuple[str, str | None]:
+            """Load a single file and return (path, content) or (path, None) on error."""
             try:
-                self._open_file_internal(state.active_file, activate=True)
+                async with aiofiles.open(file_path, "r") as f:
+                    content = await f.read()
+                return (file_path, content)
             except Exception as e:
-                log(f"[APP] Error activating file: {e}")
+                log(f"[APP] Error loading {file_path}: {e}")
+                return (file_path, None)
+
+        # Load all files in parallel
+        results = await asyncio.gather(*[load_file(f) for f in files_to_restore])
+
+        # Now add tabs (must be done on main thread, but fast since content is loaded)
+        try:
+            editor = self.query_one(EditorWidget)
+            tab_bar = self.query_one(TabBar)
+
+            for file_path, content in results:
+                if content is not None:
+                    tab_bar.add_tab(file_path, activate=False)
+
+            # Activate last active file
+            if state.active_file and Path(state.active_file).exists():
+                # Find the content for active file
+                active_content = None
+                for fp, content in results:
+                    if fp == state.active_file:
+                        active_content = content
+                        break
+
+                if active_content is not None:
+                    tab_bar.add_tab(state.active_file, activate=True)
+                    editor.text = active_content
+                    editor.current_file = Path(state.active_file)
+                    editor.is_modified = False
+
+        except Exception as e:
+            log(f"[APP] Error restoring tabs: {e}")
 
         # Restore chat sessions
         if state.chat_sessions:
@@ -408,7 +471,7 @@ class CliideApp(App[None]):
             except Exception as e:
                 log(f"[APP] Error restoring chat sessions: {e}")
 
-        log(f"[APP] Session restored: {len(state.open_files)} files, {len(state.chat_sessions)} chats")
+        log(f"[APP] Session restored: {len(files_to_restore)} files, {len(state.chat_sessions)} chats")
 
     def _open_file_internal(self, file_path: str, activate: bool = True) -> None:
         """Internal method to open a file without posting messages.
@@ -586,6 +649,11 @@ class CliideApp(App[None]):
         agent_container = self.query_one("#agent-panel-container")
         agent_container.toggle_class("hidden")
 
+    def action_toggle_terminal(self) -> None:
+        """Toggle integrated terminal (Ctrl+`)."""
+        terminal = self.query_one(TerminalPanel)
+        terminal.toggle()
+
     def action_switch_project(self) -> None:
         """Show project picker to switch projects (Ctrl+O)."""
         def on_selected(path: Path | None) -> None:
@@ -689,6 +757,36 @@ class CliideApp(App[None]):
             # Jump to line
             editor.jump_to_line(target_line, target_char)
 
+    def action_info_at_cursor(self) -> None:
+        """Show type/documentation info at cursor (Ctrl+I)."""
+        self.run_worker(self._info_at_cursor())
+
+    async def _info_at_cursor(self) -> None:
+        """Async handler for info at cursor."""
+        editor = self.query_one(EditorWidget)
+
+        if not editor.current_file:
+            self.notify("No file open", severity="warning")
+            return
+
+        line, char = editor.get_cursor_position()
+        file_path = str(editor.current_file)
+
+        # Request hover info from LSP
+        result = await self.lsp_manager.hover(file_path, line, char)
+
+        if result:
+            content = parse_hover_content(result)
+            if content:
+                # Show in notification (supports markdown-ish formatting)
+                # Truncate if too long
+                display = content[:500] + "..." if len(content) > 500 else content
+                self.notify(display, title="Info", timeout=10)
+            else:
+                self.notify("No info available", severity="warning")
+        else:
+            self.notify("No info available (LSP may not be connected)", severity="warning")
+
     def action_find_references(self) -> None:
         """Find all references."""
         self.run_worker(self._find_references())
@@ -771,6 +869,73 @@ class CliideApp(App[None]):
             self.notify("Code formatted", severity="information")
         else:
             self.notify("Formatter not available (install black/prettier)", severity="warning")
+
+    def action_symbol_search(self) -> None:
+        """Show symbol search (Go-to-Symbol)."""
+        self.run_worker(self._symbol_search())
+
+    async def _symbol_search(self) -> None:
+        """Async handler for symbol search."""
+        editor = self.query_one(EditorWidget)
+
+        if not editor.current_file:
+            self.notify("No file open", severity="warning")
+            return
+
+        file_path = str(editor.current_file)
+
+        # Request document symbols from LSP
+        symbols = await self.lsp_manager.document_symbols(file_path)
+
+        if not symbols:
+            self.notify("No symbols found (LSP may not support this)", severity="warning")
+            return
+
+        # Show symbol search panel
+        def handle_result(result: tuple[int, int] | None) -> None:
+            if result:
+                line, char = result
+                editor.jump_to_line(line, char)
+                editor.focus()
+
+        panel = SymbolSearchPanel(symbols)
+        self.push_screen(panel, handle_result)
+
+    def action_workspace_search(self) -> None:
+        """Show workspace-wide search (Find in Files)."""
+        # Check if panel already exists
+        try:
+            existing = self.query_one(ProjectSearchPanel)
+            existing.query_one("#search-input", Input).focus()
+            return
+        except Exception:
+            pass
+
+        # Create and mount search panel
+        panel = ProjectSearchPanel(self.project_path)
+        self.mount(panel)
+
+    async def on_project_search_panel_search_result_selected(
+        self, event: ProjectSearchPanel.SearchResultSelected
+    ) -> None:
+        """Handle search result selection.
+
+        Args:
+            event: Search result selected event
+        """
+        editor = self.query_one(EditorWidget)
+
+        # Open file if different
+        if str(editor.current_file) != event.file_path:
+            await editor.open_file(event.file_path)
+
+            # Update tab bar
+            tab_bar = self.query_one(TabBar)
+            tab_bar.add_tab(event.file_path)
+
+        # Jump to line
+        editor.jump_to_line(event.line, event.column)
+        editor.focus()
 
     async def on_find_replace_panel_find_requested(
         self, event: FindReplacePanel.FindRequested
