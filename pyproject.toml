@@ -12,17 +12,42 @@ license = "MIT"
 authors = [
     { name = "cliide contributors" }
 ]
-keywords = ["cli", "ide", "ai", "vllm", "code-editor", "tui"]
+keywords = [
+    "cli",
+    "ide",
+    "ai",
+    "vllm",
+    "ollama",
+    "llm",
+    "code-editor",
+    "tui",
+    "terminal",
+    "textual",
+    "copilot",
+    "coding-assistant",
+    "ai-agent",
+    "local-llm",
+    "privacy",
+    "developer-tools",
+    "code-completion",
+    "lsp",
+    "syntax-highlighting",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Text Editors",
     "Topic :: Text Editors :: Integrated Development Environments (IDE)",
+    "Typing :: Typed",
 ]
 
 dependencies = [
