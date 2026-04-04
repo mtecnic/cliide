@@ -1,286 +1,245 @@
-# cliide 🚀
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mtecnic/cliide/main/assets/logo.png" alt="cliide logo" width="200"/>
+</p>
 
-**AI-first CLI IDE powered by local VLLM models**
+<h1 align="center">cliide</h1>
 
-cliide is a terminal-based IDE that combines traditional code editing with AI assistance through locally-run VLLM models. It features a modern TUI built with Textual, LSP integration for intelligent code completion, and seamless AI chat for code explanation, refactoring, and more.
+<p align="center">
+  <strong>The AI-Native Terminal IDE</strong><br>
+  <em>Code with AI agents, not against them</em>
+</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/mtecnic/cliide/stargazers"><img src="https://img.shields.io/github/stars/mtecnic/cliide?style=for-the-badge&logo=github&color=yellow" alt="Stars"></a>
+  <a href="https://github.com/mtecnic/cliide/network/members"><img src="https://img.shields.io/github/forks/mtecnic/cliide?style=for-the-badge&logo=github&color=blue" alt="Forks"></a>
+  <a href="https://github.com/mtecnic/cliide/blob/main/LICENSE"><img src="https://img.shields.io/github/license/mtecnic/cliide?style=for-the-badge&color=green" alt="License"></a>
+  <a href="https://pypi.org/project/cliide/"><img src="https://img.shields.io/pypi/v/cliide?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI"></a>
+  <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
+</p>
 
-- 🎨 **Modern TUI Interface** - Clean 3-panel layout with file tree, editor, and AI chat
-- 🤖 **Local AI Integration** - Powered by VLLM for privacy and performance
-- 📝 **Smart Editor** - Syntax highlighting, multiple file support, vim-like keybindings
-- 🔧 **LSP Support** - Traditional IDE features (completion, diagnostics, go-to-definition)
-- 💬 **AI Chat Panel** - Ask questions, explain code, get refactoring suggestions
-- ⚡ **Fast & Lightweight** - Terminal-based for maximum efficiency
-- 🎯 **Code Actions** - AI-powered refactoring, bug fixes, and code improvements
-- 🎨 **Customizable** - Themes, keybindings, and configuration via TOML
+<p align="center">
+  <a href="#-features">Features</a> •
+  <a href="#-quick-start">Quick Start</a> •
+  <a href="#-why-cliide">Why cliide?</a> •
+  <a href="#-documentation">Docs</a> •
+  <a href="#-contributing">Contributing</a>
+</p>
 
-## Installation
+---
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mtecnic/cliide/main/assets/demo.gif" alt="cliide demo" width="800"/>
+</p>
+
+## ✨ What is cliide?
+
+**cliide** (CLI IDE) is a **terminal-based AI-first development environment** that runs entirely in your terminal. Unlike traditional IDEs with AI bolted on, cliide is built from the ground up with AI agents at its core.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 📁 Files    │ 📝 Editor                        │ 💬 AI Chat              │
+│             │                                  │                         │
+│ ▼ src/      │  def calculate_tax(income):      │ You: Optimize this      │
+│   main.py   │      if income < 50000:          │ function for large      │
+│   utils.py  │          return income * 0.1     │ datasets                │
+│   config.py │      else:                       │                         │
+│             │          return income * 0.2     │ AI: I'll refactor this  │
+│ ▼ tests/    │                                  │ to use numpy vectorized │
+│   test_m... │  [Proposed changes - Y/N]        │ operations...           │
+│             │                                  │                         │
+│ ─────────── │                                  │ 🔧 write_file(utils.py) │
+│ 📋 Tasks    │                                  │    ⏳ Executing...      │
+│ ▶ Step 1... │                                  │                         │
+│ ○ Step 2... │                                  │                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## 🎯 Why cliide?
+
+| Feature | VS Code + Copilot | Cursor | **cliide** |
+|---------|------------------|--------|------------|
+| **Runs in terminal** | ❌ | ❌ | ✅ |
+| **Uses local models** | ❌ | ❌ | ✅ |
+| **No cloud dependency** | ❌ | ❌ | ✅ |
+| **AI can edit files** | ❌ | ✅ | ✅ |
+| **Inline diff review** | ❌ | ✅ | ✅ |
+| **Sub-agent tasks** | ❌ | ❌ | ✅ |
+| **100% open source** | ❌ | ❌ | ✅ |
+| **Resource usage** | Heavy | Heavy | **Lightweight** |
+| **SSH-friendly** | ❌ | ❌ | ✅ |
+
+### 🔒 Privacy First
+
+Your code **never leaves your machine**. cliide connects to local VLLM/Ollama instances, meaning:
+- No API keys required
+- No cloud processing
+- No data retention concerns
+- Works completely offline
+
+### ⚡ Built for Speed
+
+- **Terminal-native**: No Electron, no browser, no bloat
+- **Instant startup**: Ready in milliseconds
+- **Low memory**: Runs on modest hardware
+- **SSH-ready**: Full functionality over remote connections
+
+## 🚀 Features
+
+### 🤖 AI-First Development
+- **Inline code changes**: AI proposes edits directly in the editor with diff highlighting
+- **Accept/Reject flow**: Review changes with `Y`/`N` keys before applying
+- **Multi-step planning**: AI breaks down complex tasks and shows progress
+- **Tool execution**: AI can read files, run commands, and make changes
+
+### 📝 Modern Editor
+- **Syntax highlighting** for 30+ languages
+- **LSP integration**: Completions, diagnostics, go-to-definition
+- **Multiple buffers**: Work on several files simultaneously
+- **Vim-style keybindings**: Feel right at home
+
+### 🎨 Sleek TUI
+- **Resizable panels**: Drag to resize file tree, editor, and chat
+- **Task panel**: See AI planning steps and tool executions
+- **Approval queue**: Review AI actions before they execute
+- **Rich markdown**: AI responses render beautifully
+
+### 🔧 Developer Experience
+- **Command palette**: Quick access to all commands (`Ctrl+P`)
+- **File tree**: Navigate projects with ease
+- **Find & replace**: Search across files
+- **Git integration**: Status indicators in file tree
+
+## 📦 Quick Start
 
 ### Prerequisites
+- Python 3.10+
+- A local LLM server (VLLM, Ollama, or OpenAI-compatible)
 
-- Python 3.10 or higher
-- A running VLLM server (see [VLLM Setup](#vllm-setup))
-
-### Install via pip
+### Install
 
 ```bash
 pip install cliide
 ```
 
-### Install from source
-
-```bash
-git clone https://github.com/mtecnic/cliide.git
-cd cliide
-pip install -e .
-```
-
-### Development Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/mtecnic/cliide.git
-cd cliide
-
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Set up pre-commit hooks
-pre-commit install
-```
-
-## VLLM Setup
-
-cliide requires a VLLM server running locally or accessible via network. Here's how to set it up:
-
-### Option 1: Quick Start with Docker
-
-```bash
-docker run --gpus all \
-    -p 8000:8000 \
-    vllm/vllm-openai:latest \
-    --model deepseek-ai/deepseek-coder-33b-instruct
-```
-
-### Option 2: Install VLLM Locally
-
-```bash
-# Install VLLM
-pip install vllm
-
-# Start VLLM server
-python -m vllm.entrypoints.openai.api_server \
-    --model deepseek-ai/deepseek-coder-33b-instruct \
-    --port 8000
-```
-
-### Recommended Models
-
-- **deepseek-coder-33b-instruct** - Excellent for code tasks
-- **codellama-34b-instruct** - Good all-around performance
-- **mistral-7b-instruct** - Lightweight option
-- **starcoder2-15b** - Fast code completion
-
-## Usage
-
-### Basic Usage
+### Run
 
 ```bash
 # Open current directory
 cliide
 
-# Open specific project
-cliide /path/to/project
-
-# Use custom config
-cliide --config ~/.config/cliide/my-config.toml
+# Open a specific project
+cliide ~/projects/my-app
 ```
 
-### Keybindings
+### Connect to Your LLM
 
-| Key | Action |
-|-----|--------|
-| `Ctrl+Q` | Quit application |
-| `Ctrl+P` | Open command palette |
-| `Ctrl+S` | Save current file |
-| `Ctrl+K` | Toggle AI chat panel |
-| `Ctrl+E` | Explain selected code |
-| `Ctrl+B` | Toggle file tree |
-| `Ctrl+F` | Find in file |
+```bash
+# Using Ollama (easiest)
+ollama serve
+ollama run deepseek-coder:33b
 
-### AI Commands
+# Using VLLM
+python -m vllm.entrypoints.openai.api_server \
+    --model deepseek-ai/deepseek-coder-33b-instruct
+```
 
-In the chat panel, you can use natural language or these shortcuts:
-
-- `/explain` - Explain selected code
-- `/refactor` - Get refactoring suggestions
-- `/fix` - Suggest bug fixes
-- `/test` - Generate tests for selected code
-- `/doc` - Generate documentation
-
-## Configuration
-
-Create a configuration file at `~/.config/cliide/config.toml`:
+Configure in `~/.config/cliide/config.toml`:
 
 ```toml
 [vllm]
-base_url = "http://localhost:8000/v1"
-model = "deepseek-coder-33b-instruct"
-temperature = 0.2
-max_tokens = 2048
-streaming = true
-
-[editor]
-theme = "monokai"
-tab_size = 4
-line_numbers = true
-auto_save = false
-word_wrap = false
-
-[lsp]
-enabled = true
-
-[lsp.servers]
-python = "pyright-langserver --stdio"
-rust = "rust-analyzer"
-javascript = "typescript-language-server --stdio"
-typescript = "typescript-language-server --stdio"
-go = "gopls"
-
-[keybindings]
-command_palette = "ctrl+p"
-ai_chat = "ctrl+k"
-explain_code = "ctrl+e"
-save_file = "ctrl+s"
-quit = "ctrl+q"
-
-[ui]
-show_file_tree = true
-show_chat_panel = true
-file_tree_width = 30
-chat_panel_width = 40
+base_url = "http://localhost:11434/v1"  # Ollama
+# base_url = "http://localhost:8000/v1"  # VLLM
+model = "deepseek-coder:33b"
 ```
 
-### Environment Variables
+## ⌨️ Keybindings
 
-You can also configure cliide using environment variables:
+| Key | Action |
+|-----|--------|
+| `Ctrl+P` | Command palette |
+| `Ctrl+K` | Focus AI chat |
+| `Ctrl+S` | Save file |
+| `Ctrl+B` | Toggle file tree |
+| `Ctrl+E` | Explain selected code |
+| `Y` / `N` | Accept/Reject AI changes |
+| `Ctrl+Q` | Quit |
 
-```bash
-export CLIIDE_VLLM__BASE_URL="http://localhost:8000/v1"
-export CLIIDE_VLLM__MODEL="deepseek-coder-33b-instruct"
-export CLIIDE_EDITOR__THEME="monokai"
+## 🧠 AI Commands
+
+Chat naturally or use shortcuts:
+
+```
+/explain    - Explain selected code
+/refactor   - Suggest improvements
+/fix        - Find and fix bugs
+/test       - Generate unit tests
+/doc        - Generate documentation
 ```
 
-## LSP Server Setup
-
-For full IDE features, install language servers:
-
-```bash
-# Python & TypeScript (most common)
-npm install -g pyright typescript-language-server typescript
-
-# Rust
-rustup component add rust-analyzer
-
-# Go
-go install golang.org/x/tools/gopls@latest
-```
-
-## Architecture
+## 🏗️ Architecture
 
 ```
 cliide/
-├── core/           # Application core (app, config, events)
-├── ui/             # UI widgets (editor, chat, file tree, etc.)
-├── ai/             # AI integration (VLLM client, prompts)
-├── lsp/            # LSP client and providers
-├── editor/         # Editor logic (buffer, cursor, syntax)
-└── utils/          # Utilities (file watcher, keybindings)
+├── ai/             # AI agents, prompts, event bus
+├── core/           # App core, config, session management
+├── ui/             # Textual widgets (editor, chat, panels)
+├── lsp/            # Language Server Protocol client
+└── editor/         # Buffer management, syntax highlighting
 ```
 
-## Development
+## 🤝 Contributing
 
-### Running Tests
+We love contributions! Whether it's:
+
+- 🐛 Bug reports
+- 💡 Feature suggestions
+- 📖 Documentation improvements
+- 🔧 Code contributions
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
+# Development setup
+git clone https://github.com/mtecnic/cliide.git
+cd cliide
+pip install -e ".[dev]"
+
+# Run tests
 pytest
-```
 
-### Code Quality
-
-```bash
-# Format code
-ruff format .
-
-# Lint code
-ruff check .
-
-# Type checking
-mypy cliide
-```
-
-### Live Development
-
-Textual provides a dev mode with live reloading:
-
-```bash
+# Run with live reload
 textual run --dev cliide/core/app.py
 ```
 
-## Roadmap
-
-### Phase 1: Foundation ✅
-- [x] Basic TUI with Textual
-- [x] File tree and editor
-- [x] Configuration system
-- [x] Command palette
-
-### Phase 2: AI Integration (Current)
-- [ ] VLLM client implementation
-- [ ] Chat interface with streaming
-- [ ] Basic AI commands (explain, refactor, fix)
-- [ ] Context building
-
-### Phase 3: LSP Integration
-- [ ] LSP client setup
-- [ ] Diagnostics display
-- [ ] Code completion
-- [ ] Go-to-definition
-
-### Phase 4: Advanced Features
-- [ ] Multi-file refactoring
-- [ ] Diff view for AI suggestions
-- [ ] Split panes
-- [ ] Plugin system
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
+## 📜 License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## Acknowledgments
+## 🌟 Star History
 
-- [Textual](https://github.com/Textualize/textual) - Amazing TUI framework
+<p align="center">
+  <a href="https://star-history.com/#mtecnic/cliide&Date">
+    <img src="https://api.star-history.com/svg?repos=mtecnic/cliide&type=Date" alt="Star History Chart" width="600">
+  </a>
+</p>
+
+## 💖 Acknowledgments
+
+Built with amazing open source projects:
+
+- [Textual](https://github.com/Textualize/textual) - TUI framework
+- [Rich](https://github.com/Textualize/rich) - Beautiful terminal formatting
 - [VLLM](https://github.com/vllm-project/vllm) - Fast LLM inference
-- [pygls](https://github.com/openlawlibrary/pygls) - Python LSP implementation
-- [tree-sitter](https://tree-sitter.github.io/) - Syntax parsing
-
-## Support
-
-- 📖 [Documentation](https://github.com/mtecnic/cliide/docs)
-- 🐛 [Issue Tracker](https://github.com/mtecnic/cliide/issues)
-- 💬 [Discussions](https://github.com/mtecnic/cliide/discussions)
+- [Ollama](https://github.com/ollama/ollama) - Easy local LLMs
 
 ---
 
-Made with ❤️ by the cliide contributors
+<p align="center">
+  <strong>If cliide helps you code faster, give it a ⭐!</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/mtecnic/cliide">GitHub</a> •
+  <a href="https://github.com/mtecnic/cliide/issues">Issues</a> •
+  <a href="https://github.com/mtecnic/cliide/discussions">Discussions</a>
+</p>
