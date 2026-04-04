@@ -1,16 +1,30 @@
 """Text editor widget."""
 
+import difflib
 from pathlib import Path
 from typing import Any, Optional
 
 import aiofiles
+from textual.message import Message
+from textual.reactive import reactive
 from textual.widgets import TextArea
 
 from cliide.core.events import FileSaved
 
 
 class EditorWidget(TextArea):
-    """Text editor widget with file handling."""
+    """Text editor widget with file handling and inline diff support."""
+
+    # Messages for diff accept/reject
+    class DiffAccepted(Message):
+        """Sent when user accepts inline diff changes."""
+        def __init__(self, new_code: str) -> None:
+            super().__init__()
+            self.new_code = new_code
+
+    class DiffRejected(Message):
+        """Sent when user rejects inline diff changes."""
+        pass
 
     DEFAULT_CSS = """
     EditorWidget {
@@ -29,7 +43,14 @@ class EditorWidget(TextArea):
     EditorWidget > .text-area--selection {
         background: $primary 30%;
     }
+
+    EditorWidget.-diff-mode {
+        border: round $warning;
+    }
     """
+
+    # Reactive property for diff mode
+    diff_mode: reactive[bool] = reactive(False)
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize editor widget.
@@ -47,6 +68,109 @@ class EditorWidget(TextArea):
         self.lsp_manager: Optional[Any] = None  # Set by app
         self.document_version: int = 0
         self.diagnostics: dict[str, list[Any]] = {}  # file_path -> diagnostics
+
+        # Diff mode state
+        self._diff_original: str | None = None
+        self._diff_new: str | None = None
+        self._diff_lines: dict[int, str] = {}  # line -> 'added'|'removed'|'changed'
+
+    def show_diff(self, original: str, new_code: str) -> None:
+        """Show proposed changes inline with diff highlighting.
+
+        Args:
+            original: Original code content
+            new_code: Proposed new code
+        """
+        self._diff_original = original
+        self._diff_new = new_code
+        self.diff_mode = True
+
+        # Calculate line-level diff
+        self._calculate_diff_lines(original, new_code)
+
+        # Show new code in editor (read-only during diff)
+        self.text = new_code
+        self.read_only = True
+        self.add_class("-diff-mode")
+
+    def _calculate_diff_lines(self, original: str, new_code: str) -> None:
+        """Calculate which lines are added/changed.
+
+        Args:
+            original: Original code
+            new_code: New code
+        """
+        self._diff_lines = {}
+        original_lines = original.splitlines()
+        new_lines = new_code.splitlines()
+
+        # Use difflib to find changes
+        matcher = difflib.SequenceMatcher(None, original_lines, new_lines)
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'insert':
+                # New lines added
+                for line_num in range(j1, j2):
+                    self._diff_lines[line_num] = 'added'
+            elif tag == 'replace':
+                # Lines changed
+                for line_num in range(j1, j2):
+                    self._diff_lines[line_num] = 'changed'
+            # 'equal' and 'delete' don't mark new lines
+
+    def accept_diff(self) -> None:
+        """Accept the proposed changes."""
+        if self.diff_mode and self._diff_new:
+            new_code = self._diff_new
+            self._clear_diff_state()
+            self.read_only = False
+            self.is_modified = True
+            self.post_message(self.DiffAccepted(new_code))
+
+    def reject_diff(self) -> None:
+        """Reject the proposed changes and restore original."""
+        if self.diff_mode and self._diff_original is not None:
+            original = self._diff_original
+            self._clear_diff_state()
+            self.text = original
+            self.read_only = False
+            self.post_message(self.DiffRejected())
+
+    def _clear_diff_state(self) -> None:
+        """Clear diff mode state."""
+        self._diff_original = None
+        self._diff_new = None
+        self._diff_lines = {}
+        self.diff_mode = False
+        self.remove_class("-diff-mode")
+
+    def get_diff_line_status(self, line: int) -> str | None:
+        """Get diff status for a line.
+
+        Args:
+            line: Line number (0-indexed)
+
+        Returns:
+            'added', 'changed', or None
+        """
+        return self._diff_lines.get(line)
+
+    def on_key(self, event) -> None:
+        """Handle key events - Y/N for diff mode accept/reject.
+
+        Args:
+            event: Key event
+        """
+        if self.diff_mode:
+            if event.key == "y":
+                self.accept_diff()
+                event.stop()
+            elif event.key == "n":
+                self.reject_diff()
+                event.stop()
+            elif event.key == "escape":
+                self.reject_diff()
+                event.stop()
 
     async def open_file(self, file_path: str) -> None:
         """Open a file in the editor.

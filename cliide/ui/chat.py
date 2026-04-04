@@ -5,7 +5,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Group
+from rich.console import Group, RenderableType
+from rich.markdown import Markdown
 from rich.markup import escape
 from rich.syntax import Syntax
 from rich.text import Text
@@ -129,11 +130,14 @@ class ChatMessage(Static):
                 pass
 
         # Fallback: Check for XML-style tags (for compatibility)
-        thinking_match = re.search(r'<thinking>(.*?)</thinking>', content, re.DOTALL)
-        if thinking_match:
-            thinking = thinking_match.group(1).strip()
-            main_response = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL).strip()
-            return thinking, main_response
+        # Support both <think> (DeepSeek) and <thinking> (others)
+        for tag in ["think", "thinking"]:
+            pattern = rf'<{tag}>(.*?)</{tag}>'
+            thinking_match = re.search(pattern, content, re.DOTALL)
+            if thinking_match:
+                thinking = thinking_match.group(1).strip()
+                main_response = re.sub(pattern, '', content, flags=re.DOTALL).strip()
+                return thinking, main_response
 
         # No structured thinking detected - return content as-is
         return None, content
@@ -176,32 +180,44 @@ class ChatMessage(Static):
 
         return re.sub(code_block_pattern, replace_code_block, text, flags=re.DOTALL)
 
-    def render(self) -> str:
-        """Render the message."""
+    def render(self) -> RenderableType:
+        """Render the message using Rich Markdown."""
         prefix = "👤 You" if self.is_user else "🤖 AI"
 
-        # For AI messages, check for thinking
+        # For AI messages, check for thinking and render as Markdown
         if not self.is_user:
             thinking, main_response = self._parse_thinking(self.content)
 
-            # Apply syntax highlighting to code blocks
-            main_response = self._highlight_code_blocks(main_response)
-
+            # Create header text
             if thinking:
-                # Render with collapsible thinking section
                 toggle = "[-]" if self.thinking_expanded else "[+]"
-                header = f"{prefix}: {toggle} Show thinking"
+                header = Text(f"{prefix}: {toggle} Show thinking\n\n", style="bold")
+            else:
+                header = Text(f"{prefix}: ", style="bold")
 
-                if self.thinking_expanded:
-                    thinking_highlighted = self._highlight_code_blocks(thinking)
-                    return f"{header}\n\n[dim]{thinking_highlighted}[/dim]\n\n{main_response}"
-                else:
-                    return f"{header}\n\n{main_response}"
+            # Render main response as Markdown
+            main_md = Markdown(main_response)
 
-            return f"{prefix}: {main_response}"
+            if thinking and self.thinking_expanded:
+                # Show thinking section (dimmed) then main response
+                thinking_header = Text("💭 Thinking:\n", style="dim italic")
+                thinking_md = Markdown(thinking)
+                return Group(
+                    header,
+                    thinking_header,
+                    thinking_md,
+                    Text("\n"),
+                    main_md
+                )
+            elif thinking:
+                # Thinking exists but collapsed
+                return Group(header, main_md)
+            else:
+                # No thinking
+                return Group(header, main_md)
 
-        # User message (no syntax highlighting needed)
-        return f"{prefix}: {self.content}"
+        # User message - simple text
+        return Text(f"{prefix}: {self.content}")
 
 
 class ToolExecutionMessage(Static):
@@ -1272,3 +1288,16 @@ class ChatPanel(Widget):
             self.update_tool_execution(tool_msg, event.result)
             # Clean up the reference
             del self._active_tool_messages[event.tool_call_id]
+
+    def clear_tool_messages(self) -> None:
+        """Remove all tool execution messages from chat."""
+        try:
+            tool_messages = self.query(ToolExecutionMessage)
+            for msg in tool_messages:
+                msg.remove()
+            # Clear tracking dict
+            if hasattr(self, '_active_tool_messages'):
+                self._active_tool_messages.clear()
+            log("[CHAT] Cleared tool messages")
+        except Exception as e:
+            log(f"[CHAT] Error clearing tool messages: {e}")

@@ -205,23 +205,7 @@ class CodeActions:
             log(f"[CODE_ACTIONS] No history, using user_prompt length: {len(user_prompt)}")
             messages.append({"role": "user", "content": user_prompt})
 
-        # Check for exploration-type requests that benefit from parallel sub-agents
-        # Note: "what is this" removed - it's usually about current file, not project exploration
-        exploration_keywords = [
-            "scan the project", "summarize the project", "explore the codebase",
-            "project overview", "project structure", "codebase structure",
-            "all files in", "directory structure"
-        ]
-        is_exploration = any(kw in message.lower() for kw in exploration_keywords)
-
-        # Use parallel sub-agents for exploration tasks
-        if use_tools and is_exploration:
-            log("[CODE_ACTIONS] Detected exploration request - using parallel sub-agents")
-            async for event in self._explore_with_subagents(message, messages):
-                yield event
-            return
-
-        # Use tool agent for agentic responses
+        # Use tool agent for agentic responses (AI decides when to use spawn_agent)
         if use_tools:
             from cliide.core.config import get_config
             config = get_config()

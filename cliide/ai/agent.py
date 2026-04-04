@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from typing import Any, AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -235,6 +236,86 @@ class ToolAgent:
         self.event_bus.subscribe(AgentEventType.DISCOVERY, on_discovery)
         self.event_bus.subscribe(AgentEventType.APPROVAL_NEEDED, on_approval_needed)
 
+    def _parse_plan_from_response(self, content: str) -> list[str] | None:
+        """Parse plan steps from AI response.
+
+        Looks for patterns like:
+        - PLAN:
+          1. Step one
+          2. Step two
+        - ## Plan
+          - Step one
+          - Step two
+
+        Args:
+            content: AI response content
+
+        Returns:
+            List of step descriptions, or None if no plan found
+        """
+        if not content:
+            return None
+
+        # Pattern 1: PLAN: followed by numbered list
+        plan_match = re.search(
+            r'(?:PLAN:|Plan:|## Plan)\s*\n((?:\s*\d+\.\s+.+\n?)+)',
+            content,
+            re.IGNORECASE
+        )
+        if plan_match:
+            steps_text = plan_match.group(1)
+            steps = re.findall(r'\d+\.\s+(.+?)(?:\n|$)', steps_text)
+            if steps:
+                return [s.strip() for s in steps if s.strip()]
+
+        # Pattern 2: Bullet list after "I will" or "Steps:"
+        steps_match = re.search(
+            r'(?:I will|Steps:|Here\'s my plan:)\s*\n((?:\s*[-*]\s+.+\n?)+)',
+            content,
+            re.IGNORECASE
+        )
+        if steps_match:
+            steps_text = steps_match.group(1)
+            steps = re.findall(r'[-*]\s+(.+?)(?:\n|$)', steps_text)
+            if steps:
+                return [s.strip() for s in steps if s.strip()]
+
+        return None
+
+    async def _emit_plan_if_present(self, content: str, source_id: str = "main") -> None:
+        """Parse and emit plan events if plan found in content.
+
+        Args:
+            content: AI response content
+            source_id: Source ID for events
+        """
+        steps = self._parse_plan_from_response(content)
+        if steps:
+            await self.event_bus.emit_plan_started(source_id, steps)
+
+    async def _emit_plan_step_progress(
+        self,
+        tool_name: str,
+        plan_steps: list[str],
+        current_step: int,
+        source_id: str = "main"
+    ) -> None:
+        """Try to match tool execution to a plan step and emit progress.
+
+        Args:
+            tool_name: Name of tool being executed
+            plan_steps: List of plan step descriptions
+            current_step: Current step we think we're on (1-indexed)
+            source_id: Source ID for events
+        """
+        if current_step <= len(plan_steps):
+            await self.event_bus.emit_plan_step(
+                source_id,
+                current_step,
+                plan_steps[current_step - 1],
+                completed=False,
+            )
+
     def should_confirm_tool(self, tool_name: str) -> bool:
         """Check if a tool requires user confirmation.
 
@@ -345,6 +426,8 @@ class ToolAgent:
                     # No tool calls, return the assistant's message
                     content = message.get("content", "")
                     if content:
+                        # Check for plan in response
+                        await self._emit_plan_if_present(content, "main")
                         yield {"type": "text", "content": content}
                     yield {"type": "done", "reason": "complete"}
                     return
@@ -371,6 +454,11 @@ class ToolAgent:
                         yield {"type": "warning", "message": f"Detected alternating tool loop: {last_6[0]} <-> {last_6[1]}"}
                         yield {"type": "done", "reason": "loop_detected"}
                         return
+
+                # Check for plan in AI response (may have both text and tool calls)
+                response_content = message.get("content", "")
+                if response_content:
+                    await self._emit_plan_if_present(response_content, "main")
 
                 # Process tool calls with adaptive batching based on concurrency limits
                 # and tool classification (sequential vs parallel-safe)
@@ -781,6 +869,8 @@ Work autonomously but report significant progress. Stop when the task is complet
                     # No tool calls - AI has finished or is responding
                     content = message.get("content", "")
                     if content:
+                        # Check for plan in response
+                        await self._emit_plan_if_present(content, "main")
                         yield {"type": "text", "content": content}
 
                     # Check if AI signals completion
