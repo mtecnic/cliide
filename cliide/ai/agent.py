@@ -85,15 +85,15 @@ class ToolAgent:
         # Initialize tool worker pool (created after tools registered)
         self.worker_pool: ToolWorkerPool | None = None
 
-        # Register all tools
+        # Initialize audit logger
+        self.audit_logger = get_audit_logger(enabled=tools_config.audit_log_enabled)
+
+        # Register all tools at init (eager loading)
         self._register_tools()
 
         # Set confirmation callback
         if confirmation_callback:
             self.registry.set_confirmation_callback(confirmation_callback)
-
-        # Initialize audit logger
-        self.audit_logger = get_audit_logger(enabled=tools_config.audit_log_enabled)
 
         # Subscribe to sub-agent events
         self._setup_event_handlers()
@@ -381,7 +381,6 @@ class ToolAgent:
 
         iteration = 0
         current_messages = messages.copy()
-        recent_tool_patterns: list[tuple[str, ...]] = []  # Changed from deque - deque doesn't support slicing
 
         while iteration < max_iterations:
             iteration += 1
@@ -431,29 +430,6 @@ class ToolAgent:
                         yield {"type": "text", "content": content}
                     yield {"type": "done", "reason": "complete"}
                     return
-
-                # Check for repetitive tool patterns (infinite loop detection)
-                tool_pattern = tuple(sorted(tc["function"]["name"] for tc in tool_calls))
-                recent_tool_patterns.append(tool_pattern)
-                # Keep only last 6 patterns (enough to detect 3x repeat or A,B,A,B,A,B)
-                if len(recent_tool_patterns) > 6:
-                    recent_tool_patterns = recent_tool_patterns[-6:]
-
-                # Detect exact 3x repeat
-                if len(recent_tool_patterns) >= 3 and all(p == tool_pattern for p in recent_tool_patterns[-3:]):
-                    yield {"type": "warning", "message": f"Detected repetitive tool pattern (3x): {tool_pattern}"}
-                    yield {"type": "done", "reason": "loop_detected"}
-                    return
-
-                # Detect alternating A,B,A,B,A,B pattern (6 iterations)
-                if len(recent_tool_patterns) >= 6:
-                    last_6 = recent_tool_patterns[-6:]
-                    if (last_6[0] == last_6[2] == last_6[4] and
-                        last_6[1] == last_6[3] == last_6[5] and
-                        last_6[0] != last_6[1]):
-                        yield {"type": "warning", "message": f"Detected alternating tool loop: {last_6[0]} <-> {last_6[1]}"}
-                        yield {"type": "done", "reason": "loop_detected"}
-                        return
 
                 # Check for plan in AI response (may have both text and tool calls)
                 response_content = message.get("content", "")

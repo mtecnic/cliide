@@ -235,6 +235,40 @@ class LanguageServerManager:
 
         return await client.rename(file_path, line, character, new_name)
 
+    async def hover(
+        self, file_path: str, line: int, character: int
+    ) -> Optional[dict[str, Any]]:
+        """Request hover information.
+
+        Args:
+            file_path: File path
+            line: Line number (0-indexed)
+            character: Character offset (0-indexed)
+
+        Returns:
+            Hover result with contents
+        """
+        client = self.get_client_for_file(file_path)
+        if not client:
+            return None
+
+        return await client.hover(file_path, line, character)
+
+    async def document_symbols(self, file_path: str) -> Optional[list[Any]]:
+        """Request document symbols (outline).
+
+        Args:
+            file_path: File path
+
+        Returns:
+            List of document symbols
+        """
+        client = self.get_client_for_file(file_path)
+        if not client:
+            return None
+
+        return await client.document_symbols(file_path)
+
     def register_diagnostic_handler(
         self, handler: Callable[[str, list[Any]], None]
     ) -> None:
