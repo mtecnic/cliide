@@ -55,6 +55,11 @@ class AgentEventType(str, Enum):
     # Project events
     PROJECT_CHANGED = "project_changed"
 
+    # Planning events
+    PLAN_STARTED = "plan_started"
+    PLAN_STEP_STARTED = "plan_step_started"
+    PLAN_STEP_COMPLETED = "plan_step_completed"
+
 
 @dataclass
 class AgentEvent:
@@ -113,6 +118,9 @@ class AgentEvent:
             AgentEventType.WORKER_COMPLETED: "✔️",
             AgentEventType.WORKER_FAILED: "💥",
             AgentEventType.PROJECT_CHANGED: "📁",
+            AgentEventType.PLAN_STARTED: "📋",
+            AgentEventType.PLAN_STEP_STARTED: "▶️",
+            AgentEventType.PLAN_STEP_COMPLETED: "✅",
         }.get(self.event_type, "•")
 
         message = self.data.get("message", str(self.data))
@@ -371,6 +379,57 @@ class AgentEventBus:
         ))
 
         return True
+
+    async def emit_plan_started(
+        self,
+        source_id: str,
+        steps: list[str],
+    ) -> None:
+        """Emit a plan started event.
+
+        Args:
+            source_id: Source of the event
+            steps: List of plan step descriptions
+        """
+        await self.emit(AgentEvent(
+            event_type=AgentEventType.PLAN_STARTED,
+            source_id=source_id,
+            data={
+                "steps": steps,
+                "total_steps": len(steps),
+                "message": f"Planning {len(steps)} steps",
+            },
+            priority=5,
+        ))
+
+    async def emit_plan_step(
+        self,
+        source_id: str,
+        step_num: int,
+        description: str,
+        completed: bool = False,
+    ) -> None:
+        """Emit a plan step event.
+
+        Args:
+            source_id: Source of the event
+            step_num: Step number (1-indexed)
+            description: Step description
+            completed: Whether step is completed or just started
+        """
+        event_type = (
+            AgentEventType.PLAN_STEP_COMPLETED if completed
+            else AgentEventType.PLAN_STEP_STARTED
+        )
+        await self.emit(AgentEvent(
+            event_type=event_type,
+            source_id=source_id,
+            data={
+                "step_num": step_num,
+                "description": description,
+                "message": f"Step {step_num}: {description}",
+            },
+        ))
 
     def get_pending_approvals(self) -> list[AgentEvent]:
         """Get list of pending approval requests.

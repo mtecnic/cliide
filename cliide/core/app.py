@@ -37,6 +37,7 @@ from cliide.ui.settings import SettingsScreen
 from cliide.ui.statusbar import StatusBar
 from cliide.ui.tab_bar import TabBar
 from cliide.ui.agent_status import TabbedAgentPanel
+from cliide.ui.splitter import Splitter, HorizontalSplitter
 from cliide.utils.logger import log
 
 
@@ -53,10 +54,30 @@ class CliideApp(App[None]):
         height: 1fr;
     }
 
-    #file-tree-container {
-        width: 30;
-        border-right: round $primary;
+    #left-column {
+        width: 32;
+        layout: vertical;
         background: $surface;
+        overflow: hidden;
+    }
+
+    #file-tree-container {
+        height: 1fr;
+        background: $surface;
+    }
+
+    #file-tree-container.hidden {
+        display: none;
+    }
+
+    #agent-panel-container {
+        height: 15;
+        background: $panel;
+        overflow: hidden;
+    }
+
+    #agent-panel-container.hidden {
+        display: none;
     }
 
     #editor-container {
@@ -72,8 +93,7 @@ class CliideApp(App[None]):
     }
 
     #chat-container {
-        width: 40;
-        border-left: round $primary;
+        width: 55;
         background: $surface;
     }
 
@@ -85,15 +105,6 @@ class CliideApp(App[None]):
 
     #problems-panel.visible {
         display: block;
-    }
-
-    #agent-panel-container {
-        width: 32;
-        background: $panel;
-    }
-
-    #agent-panel-container.hidden {
-        display: none;
     }
 
     .hidden {
@@ -159,9 +170,19 @@ class CliideApp(App[None]):
         yield Header()
 
         with Container(id="main-container"):
-            # File tree
-            with Container(id="file-tree-container"):
-                yield FileTree(str(self.project_path))
+            # Left column: File tree + Agent panel stacked vertically
+            with Container(id="left-column"):
+                with Container(id="file-tree-container"):
+                    yield FileTree(str(self.project_path))
+
+                # Horizontal splitter between file tree and agent panel
+                yield HorizontalSplitter("file-tree-container", "agent-panel-container", min_height=5)
+
+                with Container(id="agent-panel-container"):
+                    yield TabbedAgentPanel()
+
+            # Splitter: left column | editor
+            yield Splitter("left-column", "editor-container", min_width=15)
 
             # Editor + Tab Bar + Problems
             with Container(id="editor-container"):
@@ -169,13 +190,12 @@ class CliideApp(App[None]):
                 yield EditorWidget()
                 yield ProblemsPanel(id="problems-panel")
 
+            # Splitter: editor | chat (resize_right anchors chat to right edge)
+            yield Splitter("editor-container", "chat-container", min_width=25, resize_right=True)
+
             # Chat panel
             with Container(id="chat-container"):
                 yield ChatPanel(workspace_path=self.project_path)
-
-            # Agent status panel (tabbed: Agents + Tools)
-            with Container(id="agent-panel-container"):
-                yield TabbedAgentPanel()
 
         yield StatusBar()
         yield Footer()
@@ -462,7 +482,7 @@ class CliideApp(App[None]):
         self.push_screen(SettingsScreen(), callback=on_dismiss)
 
     async def _tool_confirmation_callback(self, tool_name: str, args: dict) -> bool:
-        """Callback for tool confirmation dialogs.
+        """Callback for tool confirmation - routes to agent panel approval queue.
 
         Args:
             tool_name: Name of the tool requesting confirmation
@@ -476,19 +496,20 @@ class CliideApp(App[None]):
             log(f"[APP] Auto-approving tool: {tool_name}")
             return True
 
-        from cliide.ui.tool_confirm import ToolConfirmationDialog
         import asyncio
 
-        # Create a future to wait for user response
-        confirmation_future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+        # Create a future to wait for user response (use running loop for Textual compatibility)
+        loop = asyncio.get_running_loop()
+        confirmation_future: asyncio.Future[bool] = loop.create_future()
 
-        def on_dismiss(result: bool | None) -> None:
-            if not confirmation_future.done():
-                confirmation_future.set_result(result if result is not None else False)
-
-        # Show confirmation dialog using push_screen with callback
-        dialog = ToolConfirmationDialog(tool_name, args)
-        self.push_screen(dialog, callback=on_dismiss)
+        # Add to the agent panel's approval queue
+        try:
+            agent_panel = self.query_one(TabbedAgentPanel)
+            agent_panel.add_approval(tool_name, args, confirmation_future)
+            log(f"[APP] Added tool approval request to queue: {tool_name}")
+        except Exception as e:
+            log(f"[APP] Error adding to approval queue: {e}, auto-approving")
+            return True
 
         # Wait for user response
         result = await confirmation_future
@@ -499,6 +520,12 @@ class CliideApp(App[None]):
         """Handle tool confirmation result to check for auto-session flag."""
         if event.auto_session:
             log("[APP] Auto-approve enabled for this session")
+            self.auto_approve_session = True
+
+    def on_approval_widget_approved(self, event) -> None:
+        """Handle approval widget approved - check for auto-session flag."""
+        if hasattr(event, 'auto_session') and event.auto_session:
+            log("[APP] Auto-approve enabled for this session (from panel)")
             self.auto_approve_session = True
 
     async def _reload_vllm_client(self) -> None:
@@ -1029,16 +1056,30 @@ class CliideApp(App[None]):
                             chat.append_ai_chunk(content)
 
                     elif event_type == "tool_start":
-                        # Tool execution starting - shown in TabbedAgentPanel Tools tab
+                        # Tool execution starting - show in chat
                         tool_name = agent_event.get("tool", "")
                         args = agent_event.get("args", {})
+                        tool_call_id = agent_event.get("tool_call_id")
                         log(f"[APP] Tool start: {tool_name} with args: {args}")
+                        # Add tool execution to chat directly
+                        tool_msg = chat.add_tool_execution(tool_name, args, tool_call_id)
+                        # Track for later update
+                        if not hasattr(self, '_active_tool_messages'):
+                            self._active_tool_messages = {}
+                        if tool_call_id:
+                            self._active_tool_messages[tool_call_id] = tool_msg
 
                     elif event_type == "tool_result":
-                        # Tool execution completed - shown in TabbedAgentPanel Tools tab
+                        # Tool execution completed - update in chat
                         tool_name = agent_event.get("tool", "")
                         result = agent_event.get("result")
+                        tool_call_id = agent_event.get("tool_call_id")
                         log(f"[APP] Tool result: {tool_name} success={getattr(result, 'success', False)}")
+                        # Update the tool message in chat
+                        if hasattr(self, '_active_tool_messages') and tool_call_id in self._active_tool_messages:
+                            tool_msg = self._active_tool_messages[tool_call_id]
+                            chat.update_tool_execution(tool_msg, result)
+                            del self._active_tool_messages[tool_call_id]
 
                     elif event_type == "error":
                         # Error occurred
@@ -1065,15 +1106,19 @@ class CliideApp(App[None]):
             chat.finish_ai_response()
             statusbar.update_ai_status("Ready")
 
-            # If we have pending code edit, show diff view
+            # If we have pending code edit, show inline diff in editor
             if self.pending_code_edit:
-                log("[APP] Showing diff view for code changes")
-                diff_view = DiffView(
+                log("[APP] Showing inline diff in editor")
+                editor = self.query_one(EditorWidget)
+                editor.show_diff(
                     self.pending_code_edit["original"],
                     self.pending_code_edit["new"],
                 )
-                self.mount(diff_view)
+                # Update status bar to show diff mode
+                statusbar.update_ai_status("Review changes: [Y]Accept [N]Reject")
 
+            # Clear tool messages from chat now that we have the final response
+            chat.clear_tool_messages()
             log("[APP] AI request completed successfully")
 
         except Exception as e:
@@ -1249,6 +1294,46 @@ class CliideApp(App[None]):
         log("[APP] Code changes rejected by user")
         self.pending_code_edit = None
         self.notify("Changes discarded", severity="warning")
+
+    async def on_editor_widget_diff_accepted(self, event: EditorWidget.DiffAccepted) -> None:
+        """Handle inline diff accepted.
+
+        Args:
+            event: Diff accepted event
+        """
+        log("[APP] Inline diff accepted")
+        self.pending_code_edit = None
+        self.notify("Code changes applied", severity="information")
+
+        # Update status bar
+        statusbar = self.query_one(StatusBar)
+        statusbar.update_ai_status("Ready")
+
+    async def on_editor_widget_diff_rejected(self, event: EditorWidget.DiffRejected) -> None:
+        """Handle inline diff rejected.
+
+        Args:
+            event: Diff rejected event
+        """
+        log("[APP] Inline diff rejected by user")
+        self.pending_code_edit = None
+        self.notify("Changes discarded", severity="warning")
+
+        # Update status bar
+        statusbar = self.query_one(StatusBar)
+        statusbar.update_ai_status("Ready")
+
+    def action_accept_diff(self) -> None:
+        """Accept current diff if in diff mode."""
+        editor = self.query_one(EditorWidget)
+        if editor.diff_mode:
+            editor.accept_diff()
+
+    def action_reject_diff(self) -> None:
+        """Reject current diff if in diff mode."""
+        editor = self.query_one(EditorWidget)
+        if editor.diff_mode:
+            editor.reject_diff()
 
     async def on_command_executed(self, event: CommandExecuted) -> None:
         """Handle command executed event."""

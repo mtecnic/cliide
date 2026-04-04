@@ -5,8 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import asyncio
+
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Button, Label, ProgressBar, Static
@@ -210,6 +213,177 @@ class AgentTaskWidget(Static):
             self.current_action = f"Running: {cmd}..."
         else:
             self.current_action = f"Using {tool_name}..."
+
+
+class PlanStepWidget(Static):
+    """Widget displaying a single plan step."""
+
+    DEFAULT_CSS = """
+    PlanStepWidget {
+        layout: horizontal;
+        height: 1;
+        padding: 0 1;
+    }
+
+    PlanStepWidget .step-num {
+        width: 3;
+        color: $text-muted;
+    }
+
+    PlanStepWidget .step-desc {
+        width: 1fr;
+        color: $text;
+    }
+
+    PlanStepWidget .step-status {
+        width: 2;
+        text-align: right;
+    }
+
+    PlanStepWidget.pending .step-status {
+        color: $text-muted;
+    }
+
+    PlanStepWidget.in_progress .step-status {
+        color: $warning;
+    }
+
+    PlanStepWidget.completed .step-status {
+        color: $success;
+    }
+    """
+
+    status: reactive[str] = reactive("pending")
+
+    def __init__(
+        self,
+        step_num: int,
+        description: str,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize plan step widget.
+
+        Args:
+            step_num: Step number (1-indexed)
+            description: Step description
+        """
+        super().__init__(**kwargs)
+        self.step_num = step_num
+        self.description = description
+
+    def compose(self) -> ComposeResult:
+        """Compose the step widget."""
+        yield Label(f"{self.step_num}.", classes="step-num")
+        yield Label(self._truncate(self.description), classes="step-desc")
+        yield Label("○", classes="step-status")
+
+    def _truncate(self, text: str) -> str:
+        """Truncate description to fit."""
+        max_len = 30
+        if len(text) > max_len:
+            return text[:max_len - 3] + "..."
+        return text
+
+    def watch_status(self, new_status: str) -> None:
+        """React to status changes."""
+        self.remove_class("pending", "in_progress", "completed")
+        self.add_class(new_status)
+
+        # Update status icon
+        try:
+            status_label = self.query_one(".step-status", Label)
+            if new_status == "pending":
+                status_label.update("○")
+            elif new_status == "in_progress":
+                status_label.update("▶")
+            elif new_status == "completed":
+                status_label.update("✓")
+        except Exception:
+            pass
+
+    def set_in_progress(self) -> None:
+        """Mark step as in progress."""
+        self.status = "in_progress"
+
+    def set_completed(self) -> None:
+        """Mark step as completed."""
+        self.status = "completed"
+
+
+class PlanView(Widget):
+    """Widget displaying agent's current plan with steps."""
+
+    DEFAULT_CSS = """
+    PlanView {
+        layout: vertical;
+        height: auto;
+        max-height: 12;
+        padding: 0 1;
+        margin-bottom: 1;
+        background: $primary 10%;
+        border: round $primary;
+    }
+
+    PlanView .plan-header {
+        text-style: bold;
+        color: $primary;
+        height: 1;
+    }
+
+    PlanView .plan-steps {
+        height: auto;
+        max-height: 10;
+        overflow-y: auto;
+    }
+
+    PlanView:empty {
+        height: 0;
+        display: none;
+    }
+    """
+
+    def __init__(self, source_id: str, steps: list[str], **kwargs: Any) -> None:
+        """Initialize plan view.
+
+        Args:
+            source_id: Agent source ID
+            steps: List of step descriptions
+        """
+        super().__init__(**kwargs)
+        self.source_id = source_id
+        self.steps = steps
+        self._step_widgets: dict[int, PlanStepWidget] = {}
+
+    def compose(self) -> ComposeResult:
+        """Compose the plan view."""
+        yield Static(f"📋 Plan ({len(self.steps)} steps)", classes="plan-header")
+        with Container(classes="plan-steps"):
+            for i, step in enumerate(self.steps, 1):
+                widget = PlanStepWidget(i, step, id=f"plan-step-{i}")
+                self._step_widgets[i] = widget
+                yield widget
+
+    def mark_step_in_progress(self, step_num: int) -> None:
+        """Mark a step as in progress.
+
+        Args:
+            step_num: Step number (1-indexed)
+        """
+        if step_num in self._step_widgets:
+            self._step_widgets[step_num].set_in_progress()
+
+    def mark_step_completed(self, step_num: int) -> None:
+        """Mark a step as completed.
+
+        Args:
+            step_num: Step number (1-indexed)
+        """
+        if step_num in self._step_widgets:
+            self._step_widgets[step_num].set_completed()
+
+    def is_complete(self) -> bool:
+        """Check if all steps are completed."""
+        return all(w.status == "completed" for w in self._step_widgets.values())
 
 
 class AgentStatusPanel(Widget):
@@ -696,118 +870,599 @@ class ToolCallsView(Widget):
 
     def _remove_tool(self, worker_id: str) -> None:
         """Remove a tool widget from the view."""
-        if worker_id in self._tools:
-            widget = self._tools.pop(worker_id)
-            widget.remove()
+        if worker_id not in self._tools:
+            return  # Already removed
 
-            # Show empty message if no tools left
-            if not self._tools:
+        widget = self._tools.pop(worker_id)
+        try:
+            if widget.is_mounted:
+                widget.remove()
+        except Exception:
+            pass  # Widget already gone
+
+        # Show empty message if no tools left
+        if not self._tools:
+            try:
                 scroll = self.query_one(VerticalScroll)
-                scroll.mount(Static("No active tool calls", id="tools-empty"))
+                if scroll.is_mounted:
+                    scroll.mount(Static("No active tool calls", id="tools-empty"))
+            except Exception:
+                pass  # Container gone
 
     def get_active_count(self) -> int:
         """Get count of currently active tool calls."""
         return sum(1 for tw in self._tools.values() if tw.status == "running")
 
 
+class ApprovalWidget(Widget):
+    """Widget for a single tool approval request."""
+
+    DEFAULT_CSS = """
+    ApprovalWidget {
+        layout: vertical;
+        height: auto;
+        padding: 0 1;
+        margin-bottom: 1;
+        background: $warning 20%;
+        border: round $warning;
+    }
+
+    ApprovalWidget .approval-header {
+        text-style: bold;
+        color: $warning;
+    }
+
+    ApprovalWidget .approval-args {
+        color: $text-muted;
+        height: auto;
+        max-height: 3;
+        overflow: hidden;
+    }
+
+    ApprovalWidget .approval-buttons {
+        layout: horizontal;
+        height: 3;
+        margin-top: 1;
+    }
+
+    ApprovalWidget Button {
+        min-width: 6;
+        height: 3;
+        margin-right: 1;
+        color: $text;
+    }
+
+    ApprovalWidget Button#approve {
+        background: $success;
+        color: $text;
+    }
+
+    ApprovalWidget Button#deny {
+        background: $error;
+        color: $text;
+    }
+
+    ApprovalWidget Button#auto-session {
+        background: $warning;
+        color: $background;
+    }
+    """
+
+    class Approved(Message):
+        """Sent when approval is granted."""
+        def __init__(self, widget: "ApprovalWidget", auto_session: bool = False) -> None:
+            super().__init__()
+            self.widget = widget
+            self.auto_session = auto_session
+
+    class Denied(Message):
+        """Sent when approval is denied."""
+        def __init__(self, widget: "ApprovalWidget") -> None:
+            super().__init__()
+            self.widget = widget
+
+    def __init__(
+        self,
+        tool_name: str,
+        args: dict,
+        future: asyncio.Future,
+        **kwargs: Any
+    ) -> None:
+        """Initialize approval widget.
+
+        Args:
+            tool_name: Name of the tool requesting approval
+            args: Tool arguments
+            future: Future to resolve with approval result
+        """
+        super().__init__(**kwargs)
+        self.tool_name = tool_name
+        self.args = args
+        self.future = future
+        self._resolved = False  # Prevent double-handling from multiple events
+
+    def compose(self) -> ComposeResult:
+        """Compose the approval widget."""
+        yield Static(f"⚠️ {self.tool_name}", classes="approval-header")
+
+        # Format args for display
+        args_str = ", ".join(f"{k}={repr(v)[:30]}" for k, v in self.args.items())
+        if len(args_str) > 60:
+            args_str = args_str[:60] + "..."
+        yield Static(args_str, classes="approval-args")
+
+        with Horizontal(classes="approval-buttons"):
+            yield Button("✓", id="approve", variant="success")
+            yield Button("✗", id="deny", variant="error")
+            yield Button("Auto", id="auto-session", variant="warning")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses."""
+        if self._resolved:
+            return  # Already handled by another event
+        self._resolved = True
+
+        if event.button.id == "approve":
+            if not self.future.done():
+                self.future.set_result(True)
+            self.post_message(self.Approved(self, auto_session=False))
+            self.remove()
+        elif event.button.id == "deny":
+            if not self.future.done():
+                self.future.set_result(False)
+            self.post_message(self.Denied(self))
+            self.remove()
+        elif event.button.id == "auto-session":
+            if not self.future.done():
+                self.future.set_result(True)
+            self.post_message(self.Approved(self, auto_session=True))
+            self.remove()
+
+    def on_key(self, event) -> None:
+        """Handle key shortcuts."""
+        if self._resolved:
+            return  # Already handled by another event
+
+        if event.key == "y":
+            self._resolved = True
+            if not self.future.done():
+                self.future.set_result(True)
+            self.post_message(self.Approved(self, auto_session=False))
+            self.remove()
+            event.stop()
+        elif event.key == "n" or event.key == "escape":
+            self._resolved = True
+            if not self.future.done():
+                self.future.set_result(False)
+            self.post_message(self.Denied(self))
+            self.remove()
+            event.stop()
+        elif event.key == "a":
+            self._resolved = True
+            if not self.future.done():
+                self.future.set_result(True)
+            self.post_message(self.Approved(self, auto_session=True))
+            self.remove()
+            event.stop()
+
+
+class ApprovalQueue(Widget):
+    """Queue of pending tool approval requests."""
+
+    DEFAULT_CSS = """
+    ApprovalQueue {
+        layout: vertical;
+        height: auto;
+        max-height: 10;
+        overflow-y: auto;
+    }
+
+    ApprovalQueue:empty {
+        height: 0;
+    }
+
+    ApprovalQueue .queue-header {
+        background: $warning;
+        color: $text;
+        text-style: bold;
+        padding: 0 1;
+        text-align: center;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Initialize approval queue."""
+        super().__init__(**kwargs)
+        self._pending: list[ApprovalWidget] = []
+
+    def compose(self) -> ComposeResult:
+        """Compose the queue - initially empty."""
+        yield from []
+
+    def add_approval(self, tool_name: str, args: dict, future: asyncio.Future) -> None:
+        """Add an approval request to the queue.
+
+        Args:
+            tool_name: Name of the tool
+            args: Tool arguments
+            future: Future to resolve with approval result
+        """
+        widget = ApprovalWidget(tool_name, args, future)
+        self._pending.append(widget)
+
+        # Add header if first item
+        if len(self._pending) == 1:
+            self.mount(Static("Pending Approvals", classes="queue-header"))
+
+        self.mount(widget)
+        log(f"[APPROVAL] Added to queue: {tool_name}")
+
+    def on_approval_widget_approved(self, event: ApprovalWidget.Approved) -> None:
+        """Handle approval - remove from pending list."""
+        if event.widget in self._pending:
+            self._pending.remove(event.widget)
+            self._check_empty()
+
+    def on_approval_widget_denied(self, event: ApprovalWidget.Denied) -> None:
+        """Handle denial - remove from pending list."""
+        if event.widget in self._pending:
+            self._pending.remove(event.widget)
+            self._check_empty()
+
+    def _check_empty(self) -> None:
+        """Remove header if queue is empty."""
+        if not self._pending:
+            try:
+                header = self.query_one(".queue-header")
+                header.remove()
+            except Exception:
+                pass
+
+    def get_pending_count(self) -> int:
+        """Get count of pending approvals."""
+        return len(self._pending)
+
+
 class TabbedAgentPanel(Widget):
-    """Tabbed panel with Agents and Tools views."""
+    """Unified panel showing approvals, plans, tasks and tools."""
 
     DEFAULT_CSS = """
     TabbedAgentPanel {
         layout: vertical;
-        width: 32;
+        width: 100%;
+        height: 100%;
         background: $panel;
-        border-left: heavy $primary-darken-2;
+        border-top: heavy $primary-darken-2;
     }
 
-    TabbedAgentPanel .tab-bar {
+    TabbedAgentPanel .panel-header {
         dock: top;
         height: 1;
-        layout: horizontal;
         background: $primary-darken-2;
-    }
-
-    TabbedAgentPanel .tab {
-        width: 1fr;
-        min-width: 10;
-        height: 1;
-        text-align: center;
-        color: #aaaaaa;
-        background: $primary-darken-3;
-        border: none;
-    }
-
-    TabbedAgentPanel .tab:hover {
-        background: $primary-darken-1;
-        color: #ffffff;
-    }
-
-    TabbedAgentPanel .tab.active {
-        background: $primary-darken-2;
-        color: #ffffff;
+        color: $text;
         text-style: bold;
+        padding: 0 1;
     }
 
-    TabbedAgentPanel .tab-content {
+    TabbedAgentPanel .unified-content {
         height: 1fr;
-    }
-
-    TabbedAgentPanel .hidden {
-        display: none;
+        overflow-y: auto;
     }
     """
 
-    active_tab: reactive[str] = reactive("agents")
-
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize tabbed agent panel."""
+        """Initialize agent panel."""
         super().__init__(**kwargs)
         self._event_bus = get_event_bus()
 
     def compose(self) -> ComposeResult:
-        """Compose the tabbed panel."""
-        with Horizontal(classes="tab-bar"):
-            yield Button("Agents", id="tab-agents", classes="tab active")
-            yield Button("Tools", id="tab-tools", classes="tab")
+        """Compose the unified panel."""
+        yield Static("Tasks", classes="panel-header")
+        # Approval queue at top (always visible when populated)
+        yield ApprovalQueue(id="approval-queue")
+        # Unified view with plans, tasks, and tools
+        yield UnifiedAgentView(id="unified-view")
 
-        with Container(classes="tab-content"):
-            yield AgentTasksView(id="agents-view")
-            yield ToolCallsView(id="tools-view", classes="hidden")
+    def get_unified_view(self) -> "UnifiedAgentView":
+        """Get the unified view component."""
+        return self.query_one("#unified-view", UnifiedAgentView)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle tab button presses."""
-        if event.button.id == "tab-agents":
-            self.active_tab = "agents"
-        elif event.button.id == "tab-tools":
-            self.active_tab = "tools"
+    def get_approval_queue(self) -> ApprovalQueue:
+        """Get the approval queue component."""
+        return self.query_one("#approval-queue", ApprovalQueue)
 
-    def watch_active_tab(self, tab: str) -> None:
-        """React to tab changes - toggle view visibility."""
+    def add_approval(self, tool_name: str, args: dict, future: asyncio.Future) -> None:
+        """Add an approval request to the queue.
+
+        Args:
+            tool_name: Name of the tool
+            args: Tool arguments
+            future: Future to resolve with approval result
+        """
+        queue = self.get_approval_queue()
+        queue.add_approval(tool_name, args, future)
+
+
+class UnifiedAgentView(Widget):
+    """Unified view showing plans, tasks, and tool calls in one scrollable area."""
+
+    DEFAULT_CSS = """
+    UnifiedAgentView {
+        layout: vertical;
+        height: 1fr;
+    }
+
+    UnifiedAgentView #unified-content {
+        height: 1fr;
+        padding: 1;
+        overflow-y: auto;
+    }
+
+    UnifiedAgentView #unified-empty {
+        color: $text-muted;
+        text-style: italic;
+        text-align: center;
+        padding-top: 1;
+    }
+
+    UnifiedAgentView .section-header {
+        color: $primary;
+        text-style: bold;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Initialize unified view."""
+        super().__init__(**kwargs)
+        self._tasks: dict[str, AgentTaskWidget] = {}
+        self._plans: dict[str, PlanView] = {}
+        self._tools: dict[str, ToolCallWidget] = {}
+        self._event_bus = get_event_bus()
+        self._fade_delay_ms = 3000
+
+    def compose(self) -> ComposeResult:
+        """Compose the unified view."""
+        with VerticalScroll(id="unified-content"):
+            yield Static("No active tasks", id="unified-empty")
+
+    def on_mount(self) -> None:
+        """Subscribe to events on mount."""
+        self._event_bus.subscribe("*", self._on_event)
+
+    def on_unmount(self) -> None:
+        """Unsubscribe on unmount."""
+        self._event_bus.unsubscribe("*", self._on_event)
+
+    async def _on_event(self, event: AgentEvent) -> None:
+        """Handle all agent events."""
+        source_id = event.source_id
+
+        # Handle planning events
+        if event.event_type == AgentEventType.PLAN_STARTED:
+            await self._add_plan(event)
+            return
+        elif event.event_type == AgentEventType.PLAN_STEP_STARTED:
+            self._update_plan_step(source_id, event, completed=False)
+            return
+        elif event.event_type == AgentEventType.PLAN_STEP_COMPLETED:
+            self._update_plan_step(source_id, event, completed=True)
+            return
+
+        # Handle worker/tool events
+        if event.event_type == AgentEventType.WORKER_STARTED:
+            await self._add_tool(event)
+            return
+        elif event.event_type == AgentEventType.WORKER_COMPLETED:
+            self._mark_tool_done(event, failed=False)
+            return
+        elif event.event_type == AgentEventType.WORKER_FAILED:
+            self._mark_tool_done(event, failed=True)
+            return
+
+        # Ignore main agent events for tasks
+        if source_id == "main":
+            return
+
+        # Handle sub-agent task events
+        if event.event_type == AgentEventType.TASK_STARTED:
+            await self._add_task(event)
+        elif event.event_type in (AgentEventType.MILESTONE, AgentEventType.PROGRESS):
+            self._update_task_progress(source_id, event)
+        elif event.event_type == AgentEventType.TOOL_CALLED:
+            self._update_task_action(source_id, event)
+        elif event.event_type == AgentEventType.TASK_COMPLETED:
+            self._mark_task_done(source_id, event, failed=False)
+        elif event.event_type == AgentEventType.TASK_FAILED:
+            self._mark_task_done(source_id, event, failed=True)
+
+    def _remove_empty_placeholder(self) -> None:
+        """Remove the empty placeholder if present."""
         try:
-            agents_view = self.query_one("#agents-view")
-            tools_view = self.query_one("#tools-view")
-
-            # Toggle visibility
-            agents_view.set_class(tab != "agents", "hidden")
-            tools_view.set_class(tab != "tools", "hidden")
-
-            # Update tab button styling
-            agents_btn = self.query_one("#tab-agents", Button)
-            tools_btn = self.query_one("#tab-tools", Button)
-
-            agents_btn.set_class(tab == "agents", "active")
-            tools_btn.set_class(tab == "tools", "active")
+            empty = self.query_one("#unified-empty")
+            empty.remove()
         except Exception:
-            pass  # Views might not be mounted yet
+            pass
 
-    def get_agents_view(self) -> AgentTasksView:
-        """Get the agents view component."""
-        return self.query_one("#agents-view", AgentTasksView)
+    def _show_empty_if_needed(self) -> None:
+        """Show empty message if nothing active."""
+        if not self._tasks and not self._plans and not self._tools:
+            try:
+                content = self.query_one("#unified-content")
+                if content.is_mounted:
+                    content.mount(Static("No active tasks", id="unified-empty"))
+            except Exception:
+                pass
 
-    def get_tools_view(self) -> ToolCallsView:
-        """Get the tools view component."""
-        return self.query_one("#tools-view", ToolCallsView)
+    async def _add_plan(self, event: AgentEvent) -> None:
+        """Add a plan view."""
+        source_id = event.source_id
+        steps = event.data.get("steps", [])
+        if not steps:
+            return
+
+        def do_add():
+            if source_id in self._plans:
+                self._plans[source_id].remove()
+
+            self._remove_empty_placeholder()
+            plan_view = PlanView(source_id, steps, id=f"plan-{source_id}")
+            try:
+                content = self.query_one("#unified-content")
+                content.mount(plan_view, before=0)
+                self._plans[source_id] = plan_view
+            except Exception:
+                pass
+
+        self.call_later(do_add)
+
+    def _update_plan_step(self, source_id: str, event: AgentEvent, completed: bool) -> None:
+        """Update plan step status."""
+        step_num = event.data.get("step_num", 0)
+
+        def do_update():
+            plan = self._plans.get(source_id)
+            if plan and step_num > 0:
+                if completed:
+                    plan.mark_step_completed(step_num)
+                else:
+                    plan.mark_step_in_progress(step_num)
+                if plan.is_complete():
+                    self.set_timer(self._fade_delay_ms / 1000, lambda: self._remove_plan(source_id))
+
+        self.call_later(do_update)
+
+    def _remove_plan(self, source_id: str) -> None:
+        """Remove a completed plan."""
+        if source_id not in self._plans:
+            return
+        plan = self._plans.pop(source_id)
+        try:
+            if plan.is_mounted:
+                plan.remove()
+        except Exception:
+            pass
+        self._show_empty_if_needed()
+
+    async def _add_tool(self, event: AgentEvent) -> None:
+        """Add a tool call widget."""
+        worker_id = event.source_id
+        tool_name = event.data.get("tool", "unknown")
+        args = event.data.get("args", {})
+
+        def do_add():
+            self._remove_empty_placeholder()
+            widget = ToolCallWidget(worker_id, tool_name, args, id=f"tool-{worker_id}")
+            try:
+                content = self.query_one("#unified-content")
+                content.mount(widget)
+                self._tools[worker_id] = widget
+            except Exception:
+                pass
+
+        self.call_later(do_add)
+
+    def _mark_tool_done(self, event: AgentEvent, failed: bool) -> None:
+        """Mark tool as done and schedule removal."""
+        worker_id = event.source_id
+
+        def do_mark():
+            widget = self._tools.get(worker_id)
+            if widget:
+                if failed:
+                    widget.mark_failed()
+                    delay = self._fade_delay_ms * 2
+                else:
+                    widget.mark_completed()
+                    delay = self._fade_delay_ms
+                self.set_timer(delay / 1000, lambda: self._remove_tool(worker_id))
+
+        self.call_later(do_mark)
+
+    def _remove_tool(self, worker_id: str) -> None:
+        """Remove a tool widget."""
+        if worker_id not in self._tools:
+            return
+        widget = self._tools.pop(worker_id)
+        try:
+            if widget.is_mounted:
+                widget.remove()
+        except Exception:
+            pass
+        self._show_empty_if_needed()
+
+    async def _add_task(self, event: AgentEvent) -> None:
+        """Add a task widget."""
+        task_id = event.source_id
+        description = event.data.get("description", "Sub-agent task")
+
+        def do_add():
+            self._remove_empty_placeholder()
+            widget = AgentTaskWidget(task_id, description, id=f"task-{task_id}")
+            widget.set_running()
+            try:
+                content = self.query_one("#unified-content")
+                content.mount(widget)
+                self._tasks[task_id] = widget
+            except Exception:
+                pass
+
+        self.call_later(do_add)
+
+    def _update_task_progress(self, task_id: str, event: AgentEvent) -> None:
+        """Update task progress."""
+        iteration = event.data.get("iteration", 0)
+        max_iterations = event.data.get("max_iterations", 25)
+        message = event.data.get("message", "")
+
+        def do_update():
+            widget = self._tasks.get(task_id)
+            if widget:
+                widget.update_progress(iteration, max_iterations, message)
+
+        self.call_later(do_update)
+
+    def _update_task_action(self, task_id: str, event: AgentEvent) -> None:
+        """Update task action."""
+        tool_name = event.data.get("tool", "unknown")
+        args = event.data.get("args", {})
+
+        def do_update():
+            widget = self._tasks.get(task_id)
+            if widget:
+                widget.update_action(tool_name, args)
+
+        self.call_later(do_update)
+
+    def _mark_task_done(self, task_id: str, event: AgentEvent, failed: bool) -> None:
+        """Mark task as done and schedule removal."""
+        result = event.data.get("result", "") if not failed else event.data.get("error", "")
+
+        def do_mark():
+            widget = self._tasks.get(task_id)
+            if widget:
+                if failed:
+                    widget.set_failed(result)
+                    delay = self._fade_delay_ms * 2
+                else:
+                    widget.set_completed(result)
+                    delay = self._fade_delay_ms
+                self.set_timer(delay / 1000, lambda: self._remove_task(task_id))
+
+        self.call_later(do_mark)
+
+    def _remove_task(self, task_id: str) -> None:
+        """Remove a task widget."""
+        if task_id not in self._tasks:
+            return
+        widget = self._tasks.pop(task_id)
+        try:
+            if widget.is_mounted:
+                widget.remove()
+        except Exception:
+            pass
+        self._show_empty_if_needed()
 
 
 class AgentTasksView(Widget):
@@ -836,6 +1491,7 @@ class AgentTasksView(Widget):
         """Initialize agent tasks view."""
         super().__init__(**kwargs)
         self._tasks: dict[str, AgentTaskWidget] = {}
+        self._plans: dict[str, PlanView] = {}  # source_id -> PlanView
         self._event_bus = get_event_bus()
         self._max_completed_tasks = 5
         self._fade_delay_ms = 3000  # 3 second delay before removal
@@ -856,9 +1512,6 @@ class AgentTasksView(Widget):
     async def _on_agent_event(self, event: AgentEvent) -> None:
         """Handle agent events."""
         log(f"[AGENT_TASKS_VIEW] Received event: {event.event_type.value} from {event.source_id}")
-        # Ignore main agent and worker events
-        if event.source_id == "main":
-            return
         # Ignore worker events (handled by ToolCallsView)
         if event.event_type in (
             AgentEventType.WORKER_STARTED,
@@ -867,7 +1520,24 @@ class AgentTasksView(Widget):
         ):
             return
 
-        task_id = event.source_id
+        source_id = event.source_id
+
+        # Handle planning events from any source (including main)
+        if event.event_type == AgentEventType.PLAN_STARTED:
+            await self._add_plan(event)
+            return
+        elif event.event_type == AgentEventType.PLAN_STEP_STARTED:
+            self._update_plan_step(source_id, event, completed=False)
+            return
+        elif event.event_type == AgentEventType.PLAN_STEP_COMPLETED:
+            self._update_plan_step(source_id, event, completed=True)
+            return
+
+        # Ignore other main agent events (sub-agent tasks only)
+        if source_id == "main":
+            return
+
+        task_id = source_id
 
         if event.event_type == AgentEventType.TASK_STARTED:
             log(f"[AGENT_TASKS_VIEW] Adding task: {task_id}")
@@ -882,6 +1552,91 @@ class AgentTasksView(Widget):
             self._mark_completed(task_id, event)
         elif event.event_type == AgentEventType.TASK_FAILED:
             self._mark_failed(task_id, event)
+
+    async def _add_plan(self, event: AgentEvent) -> None:
+        """Add a new plan view."""
+        source_id = event.source_id
+        steps = event.data.get("steps", [])
+
+        if not steps:
+            return
+
+        def do_add_plan():
+            # Remove existing plan from this source if any
+            if source_id in self._plans:
+                self._plans[source_id].remove()
+
+            plan_view = PlanView(
+                source_id=source_id,
+                steps=steps,
+                id=f"plan-{source_id}",
+            )
+
+            # Remove empty placeholder if present
+            try:
+                empty_label = self.query_one("#tasks-empty")
+                empty_label.remove()
+            except Exception:
+                pass
+
+            try:
+                content = self.query_one("#tasks-content")
+                # Mount plan at the top
+                content.mount(plan_view, before=0)
+                self._plans[source_id] = plan_view
+                log(f"[AGENT_TASKS_VIEW] Mounted plan view: {source_id} with {len(steps)} steps")
+            except Exception as e:
+                log(f"[AGENT_TASKS_VIEW] Error mounting plan: {e}")
+
+        self.call_later(do_add_plan)
+
+    def _update_plan_step(self, source_id: str, event: AgentEvent, completed: bool) -> None:
+        """Update a plan step status.
+
+        Args:
+            source_id: Agent source ID
+            event: Plan step event
+            completed: Whether step is completed or just started
+        """
+        step_num = event.data.get("step_num", 0)
+
+        def do_update():
+            plan_view = self._plans.get(source_id)
+            if plan_view and step_num > 0:
+                if completed:
+                    plan_view.mark_step_completed(step_num)
+                else:
+                    plan_view.mark_step_in_progress(step_num)
+
+                # Check if plan is complete - schedule removal
+                if plan_view.is_complete():
+                    self.set_timer(
+                        self._fade_delay_ms / 1000,
+                        lambda sid=source_id: self._remove_plan(sid)
+                    )
+
+        self.call_later(do_update)
+
+    def _remove_plan(self, source_id: str) -> None:
+        """Remove a completed plan view."""
+        if source_id not in self._plans:
+            return  # Already removed
+
+        plan_view = self._plans.pop(source_id)
+        try:
+            if plan_view.is_mounted:
+                plan_view.remove()
+        except Exception:
+            pass  # Widget already gone
+
+        # Show empty message if nothing left
+        if not self._tasks and not self._plans:
+            try:
+                content = self.query_one("#tasks-content")
+                if content.is_mounted:
+                    content.mount(Static("No active tasks", id="tasks-empty"))
+            except Exception:
+                pass
 
     async def _add_task(self, event: AgentEvent) -> None:
         """Add a new task widget."""
@@ -975,17 +1730,24 @@ class AgentTasksView(Widget):
 
     def _remove_task(self, task_id: str) -> None:
         """Remove a task after fade delay."""
-        if task_id in self._tasks:
-            widget = self._tasks.pop(task_id)
-            widget.remove()
+        if task_id not in self._tasks:
+            return  # Already removed
 
-            # Show empty message if no tasks left
-            if not self._tasks:
-                try:
-                    content = self.query_one("#tasks-content")
+        widget = self._tasks.pop(task_id)
+        try:
+            if widget.is_mounted:
+                widget.remove()
+        except Exception:
+            pass  # Widget already gone
+
+        # Show empty message if nothing left
+        if not self._tasks and not self._plans:
+            try:
+                content = self.query_one("#tasks-content")
+                if content.is_mounted:
                     content.mount(Static("No active tasks", id="tasks-empty"))
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
     def _prune_completed_tasks(self) -> None:
         """Remove old completed tasks to prevent overflow."""
@@ -1002,7 +1764,7 @@ class AgentTasksView(Widget):
             del self._tasks[task_id]
 
     def clear_completed(self) -> None:
-        """Clear all completed and failed tasks."""
+        """Clear all completed and failed tasks, and completed plans."""
         to_remove = [
             tid for tid, tw in self._tasks.items()
             if tw.task_status in ("completed", "failed")
@@ -1012,7 +1774,16 @@ class AgentTasksView(Widget):
             task_widget = self._tasks.pop(task_id)
             task_widget.remove()
 
-        if not self._tasks:
+        # Also clear completed plans
+        completed_plans = [
+            sid for sid, pv in self._plans.items()
+            if pv.is_complete()
+        ]
+        for source_id in completed_plans:
+            plan_view = self._plans.pop(source_id)
+            plan_view.remove()
+
+        if not self._tasks and not self._plans:
             content = self.query_one("#tasks-content")
             content.mount(Static("No active tasks", id="tasks-empty"))
 
