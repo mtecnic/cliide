@@ -12,11 +12,13 @@ from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 from textual.widget import Widget
 from textual.widgets import Input, Static
 
 from cliide.ai.context_builder import ContextBuilder
 from cliide.ai.event_bus import AgentEvent, AgentEventType, get_event_bus
+from cliide.ai.git_assist import GitAssist
 from cliide.core.events import AIRequestStarted, ToolExecutionStarted, ToolExecutionCompleted
 from cliide.core.session import ChatSession
 from cliide.ui.chat_tabs import ChatTabs, ChatSessionSelected, NewChatRequested, CloseChatRequested
@@ -495,6 +497,17 @@ class ChatPanel(Widget):
         self._flush_interval: float = 0.05  # 50ms batching
         self._user_at_bottom: bool = True  # Track if user is scrolled to bottom
 
+        # Track active tool messages for correlation
+        self._active_tool_messages: dict[str, any] = {}
+
+        # Request ID for streaming correlation (prevents stale closure issues)
+        self._current_request_id: int = 0
+        self._streaming_request_id: int | None = None
+
+        # Tool message TTL tracking for cleanup
+        self._tool_message_timestamps: dict[str, float] = {}
+        self._tool_ttl_seconds: float = 30.0  # Clean up orphaned tool messages after 30s
+
     def compose(self) -> ComposeResult:
         """Compose the chat panel."""
         yield ChatTabs(id="chat-tabs")
@@ -555,8 +568,8 @@ class ChatPanel(Widget):
         try:
             chat_tabs = self.query_one("#chat-tabs", ChatTabs)
             chat_tabs.add_session(session_id, name)
-        except Exception:
-            pass  # Tabs might not be mounted yet
+        except NoMatches:
+            pass  # Tabs not mounted yet during initialization
 
         # Switch to the new session
         self.switch_to_session(session_id)
@@ -590,8 +603,8 @@ class ChatPanel(Widget):
         try:
             chat_tabs = self.query_one("#chat-tabs", ChatTabs)
             chat_tabs.set_active(session_id)
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # Tabs not mounted yet
 
         log(f"[CHAT] Switched to session: {session.name} ({session_id})")
 
@@ -650,8 +663,8 @@ class ChatPanel(Widget):
         try:
             chat_tabs = self.query_one("#chat-tabs", ChatTabs)
             chat_tabs.remove_session(session_id)
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # Tabs not mounted
 
         # If we deleted the active session, switch to another
         if self.active_session_id == session_id:
@@ -692,8 +705,8 @@ class ChatPanel(Widget):
             for child in list(messages_container.children):
                 if child.id != "chat-header":
                     child.remove()
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # Container not mounted yet
 
         # Restore sessions
         for session in sessions:
@@ -701,8 +714,8 @@ class ChatPanel(Widget):
             try:
                 chat_tabs = self.query_one("#chat-tabs", ChatTabs)
                 chat_tabs.add_session(session.id, session.name)
-            except Exception:
-                pass
+            except NoMatches:
+                pass  # Tabs not mounted during restore
 
         # Switch to active session (or first available)
         if active_id and active_id in self.sessions:
@@ -726,8 +739,8 @@ class ChatPanel(Widget):
             chat_tabs = self.query_one("#chat-tabs", ChatTabs)
             for sid in list(chat_tabs._sessions.keys()):
                 chat_tabs.remove_session(sid)
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # Tabs not mounted
 
         # Clear messages
         self._render_session_messages()
@@ -817,6 +830,11 @@ class ChatPanel(Widget):
         if not message.strip():
             return
 
+        # Handle slash commands
+        if message.startswith("/"):
+            self._handle_slash_command(message)
+            return
+
         # Check for @mentioned files FIRST and create enhanced message
         mentioned_files = self.get_mentioned_files_content(message)
         enhanced_message = message
@@ -860,7 +878,9 @@ class ChatPanel(Widget):
         else:
             log(f"[CHAT] ERROR: No handler found on app!")
 
-        # Add placeholder for AI response
+        # Add placeholder for AI response with request ID tracking
+        self._current_request_id += 1
+        self._streaming_request_id = self._current_request_id
         ai_msg = ChatMessage("Thinking...", is_user=False)
         ai_msg.add_class("ai-message")
         self.current_ai_message = ai_msg
@@ -869,20 +889,185 @@ class ChatPanel(Widget):
         # Scroll to bottom
         messages.scroll_end(animate=False)
 
-    def start_ai_response(self) -> None:
-        """Start a new AI response (replaces "Thinking..." with empty message)."""
+    def _handle_slash_command(self, message: str) -> None:
+        """Handle slash commands like /commit and /review.
+
+        Args:
+            message: Command message starting with /
+        """
+        command = message.split()[0].lower()
+        args = message[len(command):].strip()
+
+        if command == "/commit":
+            self.run_worker(self._handle_commit_command(args))
+        elif command == "/review":
+            self.run_worker(self._handle_review_command())
+        elif command == "/help":
+            self._show_command_help()
+        else:
+            # Unknown command, show as message
+            messages = self.query_one("#chat-messages")
+            error_msg = ChatMessage(f"Unknown command: {command}\nType /help for available commands.", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            messages.scroll_end(animate=False)
+
+    def _show_command_help(self) -> None:
+        """Show available slash commands."""
+        help_text = """**Available Commands:**
+
+• `/commit` - Generate AI commit message for staged changes
+• `/commit -a` - Stage all changes and generate commit message
+• `/review` - AI review of uncommitted changes
+• `/help` - Show this help message"""
+
+        messages = self.query_one("#chat-messages")
+        help_msg = ChatMessage(help_text, is_user=False)
+        help_msg.add_class("ai-message")
+        messages.mount(help_msg)
+        messages.scroll_end(animate=False)
+
+    async def _handle_commit_command(self, args: str) -> None:
+        """Handle /commit command.
+
+        Args:
+            args: Command arguments (-a to stage all)
+        """
+        messages = self.query_one("#chat-messages")
+        git_assist = GitAssist(self.workspace_path)
+
+        if not git_assist.is_git_repo:
+            error_msg = ChatMessage("❌ Not a git repository", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            return
+
+        # Stage all if -a flag
+        if "-a" in args:
+            status_msg = ChatMessage("📦 Staging all changes...", is_user=False)
+            status_msg.add_class("ai-message")
+            messages.mount(status_msg)
+            messages.scroll_end(animate=False)
+
+            success, msg = await git_assist.stage_all()
+            if not success:
+                error_msg = ChatMessage(f"❌ Failed to stage: {msg}", is_user=False)
+                error_msg.add_class("ai-message")
+                messages.mount(error_msg)
+                return
+
+        # Get staged diff
+        diff = await git_assist.get_staged_diff()
+        if not diff:
+            error_msg = ChatMessage("❌ No staged changes. Stage files with `git add` or use `/commit -a`", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            return
+
+        staged_files = await git_assist.get_staged_files()
+
+        # Show status
+        files_list = ", ".join(staged_files[:5])
+        if len(staged_files) > 5:
+            files_list += f" (+{len(staged_files) - 5} more)"
+
+        status_msg = ChatMessage(f"🔍 Analyzing changes in: {files_list}", is_user=False)
+        status_msg.add_class("ai-message")
+        messages.mount(status_msg)
+        messages.scroll_end(animate=False)
+
+        # Generate commit message prompt
+        prompt = git_assist.generate_commit_prompt(diff, staged_files)
+
+        # Send to AI
+        self.conversation_history.append({"role": "user", "content": prompt})
+
+        # Create placeholder for AI response
+        ai_msg = ChatMessage("✨ Generating commit message...", is_user=False)
+        ai_msg.add_class("ai-message")
+        self.current_ai_message = ai_msg
+        messages.mount(ai_msg)
+        messages.scroll_end(animate=False)
+
+        # Call AI handler
+        from cliide.core.events import AIRequestStarted
+        event = AIRequestStarted(prompt)
+        if hasattr(self.app, 'on_ai_request_started'):
+            self.app.on_ai_request_started(event)
+
+    async def _handle_review_command(self) -> None:
+        """Handle /review command for AI code review."""
+        messages = self.query_one("#chat-messages")
+        git_assist = GitAssist(self.workspace_path)
+
+        if not git_assist.is_git_repo:
+            error_msg = ChatMessage("❌ Not a git repository", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            return
+
+        # Get all changes (staged + unstaged)
+        diff = await git_assist.get_all_changes_diff()
+        if not diff:
+            error_msg = ChatMessage("❌ No uncommitted changes to review", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            return
+
+        # Show status
+        status_msg = ChatMessage("🔍 Reviewing your changes...", is_user=False)
+        status_msg.add_class("ai-message")
+        messages.mount(status_msg)
+        messages.scroll_end(animate=False)
+
+        # Generate review prompt
+        prompt = git_assist.generate_review_prompt(diff)
+
+        # Send to AI
+        self.conversation_history.append({"role": "user", "content": prompt})
+
+        # Create placeholder for AI response
+        ai_msg = ChatMessage("📝 Generating code review...", is_user=False)
+        ai_msg.add_class("ai-message")
+        self.current_ai_message = ai_msg
+        messages.mount(ai_msg)
+        messages.scroll_end(animate=False)
+
+        # Call AI handler
+        from cliide.core.events import AIRequestStarted
+        event = AIRequestStarted(prompt)
+        if hasattr(self.app, 'on_ai_request_started'):
+            self.app.on_ai_request_started(event)
+
+    def start_ai_response(self, request_id: int | None = None) -> None:
+        """Start a new AI response (replaces "Thinking..." with empty message).
+
+        Args:
+            request_id: Optional request ID to validate against current streaming
+        """
+        # Check request ID to prevent stale closures
+        if request_id is not None and request_id != self._streaming_request_id:
+            log(f"[CHAT] Ignoring start_ai_response for stale request {request_id}")
+            return
+
         if self.current_ai_message and self.current_ai_message.content == "Thinking...":
             self.current_ai_message.content = ""
             self.current_ai_message.refresh()  # Just refresh, don't manually update text
 
-    def append_ai_chunk(self, chunk: str) -> None:
+    def append_ai_chunk(self, chunk: str, request_id: int | None = None) -> None:
         """Append a chunk to the current AI response.
 
         Uses buffering to batch UI updates for better performance.
 
         Args:
             chunk: Text chunk to append
+            request_id: Optional request ID to validate against current streaming
         """
+        # Check request ID to prevent stale closures
+        if request_id is not None and request_id != self._streaming_request_id:
+            log(f"[CHAT] Ignoring chunk for stale request {request_id}")
+            return
+
         if not self.current_ai_message:
             return
 
@@ -912,8 +1097,17 @@ class ChatPanel(Widget):
             messages = self.query_one("#chat-messages")
             messages.scroll_end(animate=False)
 
-    def finish_ai_response(self) -> None:
-        """Finish the current AI response."""
+    def finish_ai_response(self, request_id: int | None = None) -> None:
+        """Finish the current AI response.
+
+        Args:
+            request_id: Optional request ID to validate against current streaming
+        """
+        # Check request ID to prevent stale closures
+        if request_id is not None and request_id != self._streaming_request_id:
+            log(f"[CHAT] Ignoring finish_ai_response for stale request {request_id}")
+            return
+
         # Flush any remaining buffered chunks
         self._flush_chunk_buffer()
 
@@ -927,6 +1121,7 @@ class ChatPanel(Widget):
 
         # Reset buffer state
         self._chunk_buffer = ""
+        self._streaming_request_id = None
         self._user_at_bottom = True  # Reset scroll tracking
 
     def add_ai_response(self, response: str) -> None:
@@ -1231,6 +1426,14 @@ class ChatPanel(Widget):
         log(f"[CHAT] Returning {len(file_contents)} file contents")
         return file_contents
 
+    def get_current_request_id(self) -> int | None:
+        """Get the current streaming request ID.
+
+        Returns:
+            Current request ID or None if not streaming
+        """
+        return self._streaming_request_id
+
     def add_tool_execution(self, tool_name: str, args: dict, tool_call_id: str | None = None) -> ToolExecutionMessage:
         """Add a tool execution message to chat.
 
@@ -1242,11 +1445,33 @@ class ChatPanel(Widget):
         Returns:
             The created ToolExecutionMessage widget
         """
+        # Clean up any expired tool messages first
+        self._cleanup_expired_tool_messages()
+
         messages = self.query_one("#chat-messages")
         tool_msg = ToolExecutionMessage(tool_name, args)
         messages.mount(tool_msg)
         messages.scroll_end(animate=False)
+
+        # Track timestamp for TTL cleanup
+        if tool_call_id:
+            self._tool_message_timestamps[tool_call_id] = time.monotonic()
+
         return tool_msg
+
+    def _cleanup_expired_tool_messages(self) -> None:
+        """Remove tool messages that have exceeded TTL without completion."""
+        now = time.monotonic()
+        expired_ids = [
+            tool_id for tool_id, timestamp in self._tool_message_timestamps.items()
+            if now - timestamp > self._tool_ttl_seconds
+        ]
+
+        for tool_id in expired_ids:
+            # Remove from tracking
+            self._tool_message_timestamps.pop(tool_id, None)
+            self._active_tool_messages.pop(tool_id, None)
+            log(f"[CHAT] Cleaned up expired tool message: {tool_id}")
 
     def update_tool_execution(self, tool_msg: ToolExecutionMessage, result: any) -> None:
         """Update a tool execution message with result.
@@ -1269,8 +1494,6 @@ class ChatPanel(Widget):
         tool_msg = self.add_tool_execution(event.tool_name, event.args, event.tool_call_id)
 
         # Store reference with tool_call_id for updates
-        if not hasattr(self, '_active_tool_messages'):
-            self._active_tool_messages = {}
         if event.tool_call_id:
             self._active_tool_messages[event.tool_call_id] = tool_msg
 
@@ -1283,11 +1506,12 @@ class ChatPanel(Widget):
         log(f"[CHAT] Tool execution completed: {event.tool_name}")
 
         # Find and update the corresponding tool message
-        if hasattr(self, '_active_tool_messages') and event.tool_call_id in self._active_tool_messages:
+        if event.tool_call_id in self._active_tool_messages:
             tool_msg = self._active_tool_messages[event.tool_call_id]
             self.update_tool_execution(tool_msg, event.result)
-            # Clean up the reference
+            # Clean up the references
             del self._active_tool_messages[event.tool_call_id]
+            self._tool_message_timestamps.pop(event.tool_call_id, None)
 
     def clear_tool_messages(self) -> None:
         """Remove all tool execution messages from chat."""
@@ -1295,9 +1519,9 @@ class ChatPanel(Widget):
             tool_messages = self.query(ToolExecutionMessage)
             for msg in tool_messages:
                 msg.remove()
-            # Clear tracking dict
-            if hasattr(self, '_active_tool_messages'):
-                self._active_tool_messages.clear()
+            # Clear tracking dicts
+            self._active_tool_messages.clear()
+            self._tool_message_timestamps.clear()
             log("[CHAT] Cleared tool messages")
         except Exception as e:
             log(f"[CHAT] Error clearing tool messages: {e}")

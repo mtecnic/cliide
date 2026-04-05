@@ -6,6 +6,25 @@ from typing import Optional
 class PromptManager:
     """Manages AI prompts and templates."""
 
+    # Instance variable for project style context
+    _project_style: str = ""
+
+    def set_project_style(self, style: str) -> None:
+        """Set project-specific style context.
+
+        Args:
+            style: Style description from pattern analysis
+        """
+        PromptManager._project_style = style
+
+    def get_project_style(self) -> str:
+        """Get project style context.
+
+        Returns:
+            Style description
+        """
+        return PromptManager._project_style
+
     # System prompts for different tasks
     SYSTEM_PROMPTS = {
         "agent": """You are a senior software engineer in an agentic coding workflow.
@@ -150,8 +169,8 @@ RULES:
 You have full access to the codebase and can make any necessary changes.""",
     }
 
-    @staticmethod
-    def get_system_prompt(task: str) -> str:
+    @classmethod
+    def get_system_prompt(cls, task: str) -> str:
         """Get system prompt for a task.
 
         Args:
@@ -160,7 +179,13 @@ You have full access to the codebase and can make any necessary changes.""",
         Returns:
             System prompt string
         """
-        return PromptManager.SYSTEM_PROMPTS.get(task, PromptManager.SYSTEM_PROMPTS["general"])
+        base_prompt = cls.SYSTEM_PROMPTS.get(task, cls.SYSTEM_PROMPTS["general"])
+
+        # Include project style if available
+        if cls._project_style:
+            base_prompt = f"{base_prompt}\n\n## PROJECT STYLE\n{cls._project_style}"
+
+        return base_prompt
 
     @staticmethod
     def build_explain_prompt(code: str, language: Optional[str] = None) -> str:

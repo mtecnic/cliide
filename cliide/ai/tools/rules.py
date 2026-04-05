@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Any
 
+import aiofiles
+
 from .base import Tool, ToolResult, ToolCategory
 from .safety import validate_path, is_binary_file
 
@@ -149,8 +151,8 @@ class FollowRuleTool(Tool):
                 return ToolResult(success=False, error=f"Cannot analyze binary file: {path}")
 
             try:
-                with open(normalized_path, 'r', encoding='utf-8', errors='replace') as f:
-                    code = f.read()
+                async with aiofiles.open(normalized_path, 'r', encoding='utf-8', errors='replace') as f:
+                    code = await f.read()
                 source_info = normalized_path.name
             except Exception as e:
                 return ToolResult(success=False, error=f"Failed to read file: {e}")

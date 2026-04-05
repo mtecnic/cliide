@@ -1,5 +1,6 @@
 """Text editor widget."""
 
+import asyncio
 import difflib
 from pathlib import Path
 from typing import Any, Optional
@@ -9,7 +10,9 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import TextArea
 
+from cliide.ai.inline_suggest import InlineSuggest
 from cliide.core.events import FileSaved
+from cliide.utils.logger import log
 
 
 class EditorWidget(TextArea):
@@ -52,6 +55,9 @@ class EditorWidget(TextArea):
     # Reactive property for diff mode
     diff_mode: reactive[bool] = reactive(False)
 
+    # Reactive property for ghost text
+    ghost_text: reactive[str] = reactive("")
+
     def __init__(self, **kwargs: Any) -> None:
         """Initialize editor widget.
 
@@ -73,6 +79,15 @@ class EditorWidget(TextArea):
         self._diff_original: str | None = None
         self._diff_new: str | None = None
         self._diff_lines: dict[int, str] = {}  # line -> 'added'|'removed'|'changed'
+
+        # Ghost text (inline suggestions) state
+        self._inline_suggest = InlineSuggest(debounce_ms=400, max_tokens=60)
+        self._ghost_text_enabled = True
+        self._suggestion_task: asyncio.Task | None = None
+
+        # Unified debounce for text changes (LSP + suggestions)
+        self._change_debounce_timer: asyncio.TimerHandle | None = None
+        self._pending_lsp_update: bool = False
 
     def show_diff(self, original: str, new_code: str) -> None:
         """Show proposed changes inline with diff highlighting.
@@ -155,12 +170,118 @@ class EditorWidget(TextArea):
         """
         return self._diff_lines.get(line)
 
+    # -------------------------------------------------------------------------
+    # Ghost Text (Inline Suggestions)
+    # -------------------------------------------------------------------------
+
+    def _start_suggestion_task(self) -> None:
+        """Start async task to get suggestion."""
+        if not self._ghost_text_enabled:
+            return
+
+        self._suggestion_task = asyncio.create_task(self._get_suggestion())
+
+    async def _get_suggestion(self) -> None:
+        """Get AI suggestion for current cursor position."""
+        try:
+            cursor = self.cursor_location
+            if not cursor:
+                return
+
+            cursor_line, cursor_col = cursor
+
+            # Get code before and after cursor
+            lines = self.text.split("\n")
+            code_before = "\n".join(lines[:cursor_line])
+            if cursor_line < len(lines):
+                code_before += "\n" + lines[cursor_line][:cursor_col]
+
+            code_after = ""
+            if cursor_line < len(lines):
+                code_after = lines[cursor_line][cursor_col:]
+            if cursor_line + 1 < len(lines):
+                code_after += "\n" + "\n".join(lines[cursor_line + 1:])
+
+            # Get language
+            language = None
+            if self.current_file:
+                suffix = self.current_file.suffix.lower()
+                lang_map = {
+                    ".py": "python", ".js": "javascript", ".ts": "typescript",
+                    ".rs": "rust", ".go": "go", ".java": "java",
+                }
+                language = lang_map.get(suffix)
+
+            # Get suggestion
+            suggestion = await self._inline_suggest.get_suggestion(
+                code_before=code_before,
+                code_after=code_after,
+                language=language,
+                file_path=str(self.current_file) if self.current_file else None,
+            )
+
+            if suggestion:
+                self.ghost_text = suggestion
+                log(f"[EDITOR] Ghost text set: {suggestion[:30]}...")
+                self.refresh()
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log(f"[EDITOR] Suggestion error: {e}")
+
+    def accept_ghost_text(self) -> bool:
+        """Accept and insert the current ghost text.
+
+        Returns:
+            True if ghost text was accepted
+        """
+        if not self.ghost_text:
+            return False
+
+        # Insert ghost text at cursor
+        ghost = self.ghost_text
+        self.ghost_text = ""
+
+        self.insert_text_at_cursor(ghost)
+        log(f"[EDITOR] Accepted ghost text: {ghost[:30]}...")
+        return True
+
+    def dismiss_ghost_text(self) -> None:
+        """Dismiss the current ghost text."""
+        if self.ghost_text:
+            self.ghost_text = ""
+            self._inline_suggest.cancel()
+            self.refresh()
+
+    def toggle_ghost_text(self, enabled: bool | None = None) -> None:
+        """Toggle ghost text suggestions.
+
+        Args:
+            enabled: Force enabled/disabled, or toggle if None
+        """
+        if enabled is None:
+            self._ghost_text_enabled = not self._ghost_text_enabled
+        else:
+            self._ghost_text_enabled = enabled
+
+        if not self._ghost_text_enabled:
+            self.dismiss_ghost_text()
+
+        log(f"[EDITOR] Ghost text {'enabled' if self._ghost_text_enabled else 'disabled'}")
+
+    def watch_ghost_text(self, value: str) -> None:
+        """React to ghost text changes."""
+        # Could trigger visual updates here
+        pass
+
     def on_key(self, event) -> None:
-        """Handle key events - Y/N for diff mode accept/reject.
+        """Handle key events - Y/N for diff mode, Tab for ghost text.
 
         Args:
             event: Key event
         """
+        # Diff mode keys
         if self.diff_mode:
             if event.key == "y":
                 self.accept_diff()
@@ -171,6 +292,20 @@ class EditorWidget(TextArea):
             elif event.key == "escape":
                 self.reject_diff()
                 event.stop()
+            return
+
+        # Ghost text keys
+        if self.ghost_text:
+            if event.key == "tab":
+                if self.accept_ghost_text():
+                    event.stop()
+                    event.prevent_default()
+            elif event.key == "escape":
+                self.dismiss_ghost_text()
+                event.stop()
+            elif event.key not in ("shift", "ctrl", "alt", "meta"):
+                # Any other key dismisses ghost text
+                self.dismiss_ghost_text()
 
     async def open_file(self, file_path: str) -> None:
         """Open a file in the editor.
@@ -178,6 +313,11 @@ class EditorWidget(TextArea):
         Args:
             file_path: Path to file to open
         """
+        # Clear any existing diff state to prevent cross-file contamination
+        if self.diff_mode:
+            self._clear_diff_state()
+            self.read_only = False
+
         path = Path(file_path)
 
         if not path.exists() or not path.is_file():
@@ -307,22 +447,56 @@ class EditorWidget(TextArea):
             self.language = None
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        """Handle text changes.
+        """Handle text changes with debounced LSP and suggestions.
 
         Args:
             event: Change event
         """
         if self.current_file:
             self.is_modified = True
+            self._pending_lsp_update = True
 
-            # Notify LSP of change
-            if self.lsp_manager:
-                self.document_version += 1
-                self.run_worker(
-                    self.lsp_manager.did_change(
-                        str(self.current_file), self.document_version, self.text
-                    )
+            # Clear ghost text immediately on typing
+            if self.ghost_text:
+                self.ghost_text = ""
+
+            # Cancel any pending debounce timer
+            if self._change_debounce_timer:
+                self._change_debounce_timer.cancel()
+
+            # Single debounced callback for both LSP and suggestions
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+
+            self._change_debounce_timer = loop.call_later(
+                0.3,  # 300ms debounce
+                self._on_change_debounced
+            )
+
+    def _on_change_debounced(self) -> None:
+        """Called after typing pause - notify LSP and trigger suggestions."""
+        # LSP notification
+        if self._pending_lsp_update and self.lsp_manager and self.current_file:
+            self._pending_lsp_update = False
+            self.document_version += 1
+            self.run_worker(
+                self.lsp_manager.did_change(
+                    str(self.current_file), self.document_version, self.text
                 )
+            )
+
+        # Ghost text suggestion
+        if self._ghost_text_enabled and not self.diff_mode and not self.read_only:
+            # Cancel any existing suggestion task
+            # Note: cancel() is safe to call on done tasks (returns False)
+            if self._suggestion_task:
+                try:
+                    self._suggestion_task.cancel()
+                except Exception:
+                    pass  # Task may have completed between check and cancel
+            self._start_suggestion_task()
 
     def get_cursor_position(self) -> tuple[int, int]:
         """Get current cursor position.
@@ -341,7 +515,8 @@ class EditorWidget(TextArea):
             file_path: File path
             diagnostics: List of LSP diagnostics
         """
-        self.diagnostics[file_path] = diagnostics
+        # Defensive copy to prevent mutation by caller
+        self.diagnostics[file_path] = list(diagnostics)
 
         # If this is the current file, apply inline highlights
         if self.current_file and str(self.current_file) == file_path:

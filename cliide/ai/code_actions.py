@@ -93,6 +93,90 @@ class CodeActions:
         async for chunk in self.client.stream_with_system(system_prompt, user_prompt):
             yield chunk
 
+    async def smart_fix_error(
+        self,
+        file_content: str,
+        error_message: str,
+        error_line: int,
+        language: Optional[str] = None,
+        context_lines: int = 10,
+    ) -> Optional[str]:
+        """Generate a smart fix for a specific error.
+
+        Args:
+            file_content: Full file content
+            error_message: Error/diagnostic message
+            error_line: Line number where error occurs (0-indexed)
+            language: Programming language
+            context_lines: Number of context lines around error
+
+        Returns:
+            Fixed code for the entire file, or None if fix failed
+        """
+        from cliide.utils.logger import log
+
+        lines = file_content.split("\n")
+        total_lines = len(lines)
+
+        # Validate error_line is within bounds
+        if error_line < 0 or error_line >= total_lines:
+            log(f"[CODE_ACTIONS] Invalid error_line={error_line}, total_lines={total_lines}")
+            return None
+
+        # Calculate context range
+        start_line = max(0, error_line - context_lines)
+        end_line = min(total_lines, error_line + context_lines + 1)
+
+        # Extract code around error
+        context_code = "\n".join(lines[start_line:end_line])
+        relative_error_line = error_line - start_line + 1
+
+        # Build prompt for inline fix
+        prompt = f"""Fix the following error in this code.
+
+**Error:** {error_message}
+**Error Location:** Line {relative_error_line} in the snippet below
+
+```{language or ''}
+{context_code}
+```
+
+Return ONLY the fixed version of the ENTIRE snippet above.
+Do not explain. Do not include markdown code fences.
+Just return the corrected code, maintaining exact formatting."""
+
+        log(f"[SMART_FIX] Generating fix for: {error_message[:50]}...")
+
+        try:
+            # Get fix from AI (non-streaming for simplicity)
+            response = ""
+            async for chunk in self.client.stream_with_system(
+                "You are a code fixer. Return only corrected code, no explanations.",
+                prompt,
+            ):
+                response += chunk
+
+            # Clean up response (remove any markdown fences)
+            fixed_code = response.strip()
+            if fixed_code.startswith("```"):
+                # Remove opening fence
+                first_newline = fixed_code.find("\n")
+                if first_newline != -1:
+                    fixed_code = fixed_code[first_newline + 1:]
+            if fixed_code.endswith("```"):
+                fixed_code = fixed_code[:-3].rstrip()
+
+            # Reconstruct full file with fix
+            new_lines = lines[:start_line] + fixed_code.split("\n") + lines[end_line:]
+            new_content = "\n".join(new_lines)
+
+            log(f"[SMART_FIX] Generated fix ({len(new_content)} chars)")
+            return new_content
+
+        except Exception as e:
+            log(f"[SMART_FIX] Error generating fix: {e}")
+            return None
+
     async def generate_tests(
         self, code: str, language: Optional[str] = None
     ) -> AsyncIterator[str]:

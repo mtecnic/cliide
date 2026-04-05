@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import aiofiles
+
 from cliide.ai.tools.base import Tool, ToolCategory, ToolResult, RiskLevel
 
 
@@ -98,7 +100,7 @@ You can optionally specify a specific test file or pattern to run."""
             "required": []
         }
 
-    def _detect_framework(self) -> str | None:
+    async def _detect_framework(self) -> str | None:
         """Auto-detect the testing framework.
 
         Returns:
@@ -111,8 +113,9 @@ You can optionally specify a specific test file or pattern to run."""
                     if framework == "npm" and file_pattern == "package.json":
                         # Check if it has a test script
                         try:
-                            with open(self.workspace_root / "package.json") as f:
-                                pkg = json.load(f)
+                            async with aiofiles.open(self.workspace_root / "package.json") as f:
+                                content = await f.read()
+                                pkg = json.loads(content)
                                 if "test" in pkg.get("scripts", {}):
                                     return framework
                         except (json.JSONDecodeError, FileNotFoundError):
@@ -137,7 +140,7 @@ You can optionally specify a specific test file or pattern to run."""
 
         # Auto-detect framework if not specified
         if not framework:
-            framework = self._detect_framework()
+            framework = await self._detect_framework()
             if not framework:
                 return ToolResult(
                     success=False,

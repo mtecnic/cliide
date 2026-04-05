@@ -117,8 +117,13 @@ Common uses: pytest, npm test, cargo build, git status, etc."""
         # Check if base command is in allowlist
         # Also allow commands with paths like ./script.sh or /usr/bin/python
         if base_cmd.startswith("./") or base_cmd.startswith("/"):
-            # Allow scripts in the workspace
+            # Allow scripts in the workspace - but verify they exist
             if base_cmd.startswith("./"):
+                script_path = self.workspace_root / base_cmd[2:]  # Remove "./" prefix
+                if not script_path.exists():
+                    return False, f"Script does not exist: {base_cmd}"
+                if not script_path.is_file():
+                    return False, f"Not a file: {base_cmd}"
                 return True, ""
             # Be cautious with absolute paths
             return False, f"Absolute paths not allowed for safety: {base_cmd}"
@@ -173,10 +178,12 @@ Common uses: pytest, npm test, cargo build, git status, etc."""
         else:
             cwd = self.workspace_root
 
-        # Execute command
+        # Execute command using subprocess_exec to avoid shell injection
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
+            # Parse command into arguments (already validated via shlex.split earlier)
+            cmd_args = shlex.split(command)
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
                 cwd=str(cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

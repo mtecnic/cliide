@@ -109,6 +109,12 @@ class AsyncLSPClient:
                 except asyncio.CancelledError:
                     pass
 
+            # Cancel all pending requests to prevent hangs
+            for request_id, future in list(self.pending_requests.items()):
+                if not future.done():
+                    future.cancel()
+            self.pending_requests.clear()
+
             # Close pipes properly
             if self.process:
                 if self.process.stdin and not self.process.stdin.is_closing():
@@ -177,6 +183,11 @@ class AsyncLSPClient:
                     if not line_str:
                         break  # Empty line, end of headers
 
+                    # Validate header format before splitting
+                    if ":" not in line_str:
+                        log(f"[LSP] Invalid header format (no colon): {line_str}")
+                        continue
+
                     key, value = line_str.split(":", 1)
                     headers[key.strip()] = value.strip()
 
@@ -187,7 +198,13 @@ class AsyncLSPClient:
 
                 # Read content
                 content = await self.process.stdout.readexactly(content_length)
-                message = json.loads(content.decode("utf-8"))
+
+                # Parse JSON with error handling
+                try:
+                    message = json.loads(content.decode("utf-8"))
+                except json.JSONDecodeError as e:
+                    log(f"[LSP] Invalid JSON in message: {e}")
+                    continue
 
                 # Handle message
                 await self._handle_message(message)
