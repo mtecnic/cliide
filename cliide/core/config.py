@@ -1,11 +1,16 @@
 """Configuration management for cliide."""
 
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Lock for thread-safe config access
+_config_lock = threading.Lock()
 
 if sys.version_info < (3, 11):
     import tomli as tomllib
@@ -213,7 +218,13 @@ class Config(BaseSettings):
                 try:
                     with open(config_path, "rb") as f:
                         data = tomllib.load(f)
-                    log(f"[CONFIG] Loaded config data: {data}")
+                    # Log without secrets
+                    safe_data = {k: v for k, v in data.items() if k != "vllm"}
+                    if "vllm" in data:
+                        vllm_safe = {k: v for k, v in data["vllm"].items() if k != "api_key"}
+                        vllm_safe["api_key"] = "***" if data["vllm"].get("api_key") else None
+                        safe_data["vllm"] = vllm_safe
+                    log(f"[CONFIG] Loaded config data: {safe_data}")
                     config = cls(**data)
                     log(f"[CONFIG] Config loaded - URL: {config.vllm.base_url}, Model: {config.vllm.model}")
                     return config
@@ -269,7 +280,13 @@ class Config(BaseSettings):
             # Exclude None values since TOML can't serialize them
             try:
                 config_dict = self.model_dump(exclude_none=True)
-                log(f"[CONFIG] Config data to save: {config_dict}")
+                # Log without secrets
+                safe_dict = {k: v for k, v in config_dict.items() if k != "vllm"}
+                if "vllm" in config_dict:
+                    vllm_safe = {k: v for k, v in config_dict["vllm"].items() if k != "api_key"}
+                    vllm_safe["api_key"] = "***" if config_dict["vllm"].get("api_key") else None
+                    safe_dict["vllm"] = vllm_safe
+                log(f"[CONFIG] Config data to save: {safe_dict}")
             except Exception as e:
                 log(f"[CONFIG] ERROR: Failed to serialize config: {e}")
                 raise IOError(f"Cannot serialize config: {e}") from e
@@ -308,21 +325,25 @@ _config: Config | None = None
 
 
 def get_config() -> Config:
-    """Get the global config instance."""
+    """Get the global config instance (thread-safe)."""
     global _config
     if _config is None:
-        _config = Config.load_from_file()
+        with _config_lock:
+            # Double-check inside lock
+            if _config is None:
+                _config = Config.load_from_file()
     return _config
 
 
 def set_config(config: Config) -> None:
-    """Set the global config instance."""
+    """Set the global config instance (thread-safe)."""
     global _config
-    _config = config
+    with _config_lock:
+        _config = config
 
 
 def reload_config() -> Config:
-    """Force reload configuration from file.
+    """Force reload configuration from file (thread-safe).
 
     Returns:
         Freshly loaded config instance
@@ -330,12 +351,13 @@ def reload_config() -> Config:
     from cliide.utils.logger import log
 
     global _config
-    log("[CONFIG] Forcing config reload from file...")
-    _config = None  # Clear cached config
-    config = Config.load_from_file()  # Reload from file
-    _config = config
-    log(f"[CONFIG] Config reloaded - URL: {config.vllm.base_url}, Model: {config.vllm.model}")
-    return config
+    with _config_lock:
+        log("[CONFIG] Forcing config reload from file...")
+        _config = None  # Clear cached config
+        config = Config.load_from_file()  # Reload from file
+        _config = config
+        log(f"[CONFIG] Config reloaded - URL: {config.vllm.base_url}, Model: {config.vllm.model}")
+        return config
 
 
 def get_user_config_path() -> Path:

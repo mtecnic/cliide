@@ -5,8 +5,32 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import aiofiles
+
 from .base import Tool, ToolResult, ToolCategory
 from .safety import validate_path, is_binary_file
+
+
+def _is_path_within_workspace(path: Path, workspace_root: Path) -> bool:
+    """Check if a resolved path is within the workspace.
+
+    This prevents symlink escape attacks where a symlink inside the workspace
+    points to files outside the workspace.
+
+    Args:
+        path: Path to check (will be resolved)
+        workspace_root: Workspace root directory
+
+    Returns:
+        True if path is within workspace after symlink resolution
+    """
+    try:
+        resolved = path.resolve()
+        workspace_resolved = workspace_root.resolve()
+        resolved.relative_to(workspace_resolved)
+        return True
+    except ValueError:
+        return False
 
 
 class SearchFilesTool(Tool):
@@ -60,8 +84,11 @@ class SearchFilesTool(Tool):
             else:
                 matches = list(self.workspace_root.glob(pattern))
 
-            # Filter to only files
-            file_matches = [m for m in matches if m.is_file()]
+            # Filter to only files within workspace (prevents symlink escape)
+            file_matches = [
+                m for m in matches
+                if m.is_file() and _is_path_within_workspace(m, self.workspace_root)
+            ]
 
             # Limit results
             if len(file_matches) > max_results:
@@ -168,8 +195,11 @@ class GrepTool(Tool):
             else:
                 files = list(self.workspace_root.glob(file_pattern))
 
-            # Filter to only files
-            files = [f for f in files if f.is_file()]
+            # Filter to only files within workspace (prevents symlink escape)
+            files = [
+                f for f in files
+                if f.is_file() and _is_path_within_workspace(f, self.workspace_root)
+            ]
 
             # Search files
             matches = []
@@ -186,9 +216,11 @@ class GrepTool(Tool):
                     continue
 
                 try:
-                    # Read and search file
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line_no, line in enumerate(f, start=1):
+                    # Read and search file asynchronously
+                    async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        line_no = 0
+                        async for line in f:
+                            line_no += 1
                             if regex.search(line):
                                 total_matches += 1
                                 if len(matches) < max_results:
@@ -334,15 +366,21 @@ class FindSymbolTool(Tool):
 
             for fp in file_patterns:
                 files = list(self.workspace_root.rglob(fp) if "**" in fp else self.workspace_root.glob(fp))
-                files = [f for f in files if f.is_file()]
+                # Filter to files within workspace (prevents symlink escape)
+                files = [
+                    f for f in files
+                    if f.is_file() and _is_path_within_workspace(f, self.workspace_root)
+                ]
 
                 for file_path in files:
                     if is_binary_file(file_path):
                         continue
 
                     try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            for line_no, line in enumerate(f, start=1):
+                        async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            line_no = 0
+                            async for line in f:
+                                line_no += 1
                                 for pattern in patterns:
                                     if re.search(pattern, line):
                                         rel_path = file_path.relative_to(self.workspace_root)

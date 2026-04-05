@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import aiofiles
+
 
 class AuditLogger:
     """Logger for tool execution audits."""
@@ -65,11 +67,11 @@ class AuditLogger:
 
         log_entry += "\n"
 
-        # Write to file asynchronously
+        # Write to file asynchronously (non-blocking)
         async with self._lock:
             try:
-                with open(self.log_file, 'a', encoding='utf-8') as f:
-                    f.write(log_entry)
+                async with aiofiles.open(self.log_file, 'a', encoding='utf-8') as f:
+                    await f.write(log_entry)
             except Exception:
                 # Silently fail if logging fails
                 pass
@@ -109,8 +111,9 @@ class AuditLogger:
 
         try:
             async with self._lock:
-                with open(self.log_file, 'r', encoding='utf-8') as f:
-                    all_lines = f.readlines()
+                async with aiofiles.open(self.log_file, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    all_lines = content.splitlines(keepends=True)
 
             # Return last N lines
             return all_lines[-lines:] if lines < len(all_lines) else all_lines

@@ -1,12 +1,17 @@
 """Event bus for agent communication and milestone notifications."""
 
 import asyncio
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Awaitable
 
 from cliide.utils.logger import log
+
+
+# Lock for thread-safe singleton access
+_event_bus_lock = threading.Lock()
 
 
 class AgentEventType(str, Enum):
@@ -532,18 +537,22 @@ _global_event_bus: AgentEventBus | None = None
 
 
 def get_event_bus() -> AgentEventBus:
-    """Get the global event bus instance.
+    """Get the global event bus instance (thread-safe).
 
     Returns:
         Global AgentEventBus instance
     """
     global _global_event_bus
     if _global_event_bus is None:
-        _global_event_bus = AgentEventBus()
+        with _event_bus_lock:
+            # Double-check inside lock
+            if _global_event_bus is None:
+                _global_event_bus = AgentEventBus()
     return _global_event_bus
 
 
 def reset_event_bus() -> None:
-    """Reset the global event bus instance."""
+    """Reset the global event bus instance (thread-safe)."""
     global _global_event_bus
-    _global_event_bus = None
+    with _event_bus_lock:
+        _global_event_bus = None

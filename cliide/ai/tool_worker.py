@@ -139,6 +139,9 @@ class ToolWorkerPool:
         # Concurrency control
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
+        # Lock for protecting shared state modifications
+        self._state_lock = asyncio.Lock()
+
     async def submit(
         self,
         tool_call_id: str,
@@ -167,14 +170,15 @@ class ToolWorkerPool:
             args=args,
             parent_task_id=parent_task_id,
         )
-        self._workers[worker_id] = worker
 
-        # Create result event for waiting
-        self._result_events[tool_call_id] = asyncio.Event()
-
-        # Start execution task
-        task = asyncio.create_task(self._execute_worker(worker))
-        self._running_tasks[worker_id] = task
+        # Protect state modifications with lock
+        async with self._state_lock:
+            self._workers[worker_id] = worker
+            # Create result event for waiting
+            self._result_events[tool_call_id] = asyncio.Event()
+            # Start execution task
+            task = asyncio.create_task(self._execute_worker(worker))
+            self._running_tasks[worker_id] = task
 
         return worker_id
 
@@ -279,15 +283,17 @@ class ToolWorkerPool:
             finally:
                 worker.completed_at = datetime.now()
 
-                # Store result and signal waiters
-                if worker.result:
-                    self._results[worker.tool_call_id] = worker.result
+                # Protect state modifications with lock
+                async with self._state_lock:
+                    # Store result and signal waiters
+                    if worker.result:
+                        self._results[worker.tool_call_id] = worker.result
 
-                if worker.tool_call_id in self._result_events:
-                    self._result_events[worker.tool_call_id].set()
+                    if worker.tool_call_id in self._result_events:
+                        self._result_events[worker.tool_call_id].set()
 
-                # Clean up running task
-                self._running_tasks.pop(worker.worker_id, None)
+                    # Clean up running task
+                    self._running_tasks.pop(worker.worker_id, None)
 
     async def wait_for_result(
         self,

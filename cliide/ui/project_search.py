@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import aiofiles
+
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
@@ -125,6 +127,14 @@ class ProjectSearchPanel(Container):
     def on_mount(self) -> None:
         """Focus input on mount."""
         self.query_one("#search-input", Input).focus()
+
+    def on_unmount(self) -> None:
+        """Cancel any running search task on unmount."""
+        if self._search_task:
+            try:
+                self._search_task.cancel()
+            except Exception:
+                pass  # Task may have already completed
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
@@ -307,8 +317,10 @@ class ProjectSearchPanel(Container):
             """Search a single file."""
             matches = []
             try:
-                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                    for line_num, line in enumerate(f, 1):
+                async with aiofiles.open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    line_num = 0
+                    async for line in f:
+                        line_num += 1
                         match = pattern.search(line)
                         if match:
                             matches.append({
@@ -318,8 +330,8 @@ class ProjectSearchPanel(Container):
                             })
                             if len(matches) >= 100:  # Limit per file
                                 break
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError):
+                pass  # Skip files we can't read
             return matches
 
         # Walk workspace

@@ -1,5 +1,6 @@
 """Main cliide application."""
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from textual.widgets import Footer, Header, Input
 from cliide.ai.code_actions import CodeActions
 from cliide.ai.context_builder import ContextBuilder
 from cliide.ai.event_bus import AgentEvent, AgentEventType, get_event_bus
+from cliide.ai.pattern_analyzer import PatternAnalyzer
 from cliide.ai.prompt_manager import PromptManager
 from cliide.core.config import Config, get_config
 from cliide.core.events import AIRequestStarted, CommandExecuted, FileOpened, ToolConfirmationResult
@@ -140,6 +142,10 @@ class CliideApp(App[None]):
         Binding("ctrl+shift+o", "symbol_search", "Go to Symbol", show=False),
         Binding("ctrl+i", "info_at_cursor", "Info", show=False),
         Binding("alt+shift+f", "format_code", "Format Code", show=False),
+        Binding("ctrl+shift+g", "ai_commit", "AI Commit", show=False),
+        Binding("ctrl+shift+r", "ai_review", "AI Review", show=False),
+        Binding("ctrl+period", "smart_fix", "Quick Fix", show=False),
+        Binding("ctrl+shift+i", "toggle_suggestions", "Toggle Suggestions", show=False),
     ]
 
     def __init__(self, project_path: Path | None = None, **kwargs: Any) -> None:
@@ -170,6 +176,12 @@ class CliideApp(App[None]):
         # Session and recent projects management
         self.session_manager = SessionManager(self.project_path)
         self.recent_projects = RecentProjectsManager()
+
+        # Pattern analyzer for learning codebase conventions
+        self.pattern_analyzer = PatternAnalyzer(self.project_path)
+
+        # Track active tool messages for correlation
+        self._active_tool_messages: dict[str, Any] = {}
 
         # Register and apply custom theme
         self.register_theme(CLIIDE_THEME)
@@ -262,6 +274,9 @@ class CliideApp(App[None]):
         # Restore session
         self._restore_session()
 
+        # Analyze codebase patterns in background
+        self.run_worker(self._analyze_patterns())
+
     async def _check_ai_connection(self) -> None:
         """Check AI connection in background and update status."""
         statusbar = self.query_one(StatusBar)
@@ -273,6 +288,25 @@ class CliideApp(App[None]):
                 statusbar.update_ai_status("Disconnected")
         except Exception:
             statusbar.update_ai_status("Disconnected")
+
+    async def _analyze_patterns(self) -> None:
+        """Analyze codebase patterns in background."""
+        try:
+            # Delay slightly to not compete with startup
+            await asyncio.sleep(2)
+
+            patterns = await self.pattern_analyzer.analyze(max_files=30)
+            if patterns:
+                log(f"[APP] Analyzed codebase patterns: {len(patterns)} types")
+
+                # Make patterns available to prompt manager
+                style_prompt = self.pattern_analyzer.get_style_prompt()
+                if style_prompt:
+                    self.prompt_manager.set_project_style(style_prompt)
+                    log(f"[APP] Set project style context ({len(style_prompt)} chars)")
+
+        except Exception as e:
+            log(f"[APP] Pattern analysis error: {e}")
 
     def _show_startup_picker(self) -> None:
         """Show project picker on startup when no path given."""
@@ -426,11 +460,21 @@ class CliideApp(App[None]):
         async def load_file(file_path: str) -> tuple[str, str | None]:
             """Load a single file and return (path, content) or (path, None) on error."""
             try:
+                # Re-check existence right before reading (file may have been deleted)
+                if not Path(file_path).exists():
+                    log(f"[APP] File no longer exists: {file_path}")
+                    return (file_path, None)
                 async with aiofiles.open(file_path, "r") as f:
                     content = await f.read()
                 return (file_path, content)
-            except Exception as e:
-                log(f"[APP] Error loading {file_path}: {e}")
+            except FileNotFoundError:
+                log(f"[APP] File not found during restore: {file_path}")
+                return (file_path, None)
+            except PermissionError:
+                log(f"[APP] Permission denied reading: {file_path}")
+                return (file_path, None)
+            except OSError as e:
+                log(f"[APP] OS error loading {file_path}: {e}")
                 return (file_path, None)
 
         # Load all files in parallel
@@ -446,7 +490,8 @@ class CliideApp(App[None]):
                     tab_bar.add_tab(file_path, activate=False)
 
             # Activate last active file
-            if state.active_file and Path(state.active_file).exists():
+            active_path = Path(state.active_file) if state.active_file else None
+            if active_path and active_path.exists() and active_path.is_file():
                 # Find the content for active file
                 active_content = None
                 for fp, content in results:
@@ -457,11 +502,13 @@ class CliideApp(App[None]):
                 if active_content is not None:
                     tab_bar.add_tab(state.active_file, activate=True)
                     editor.text = active_content
-                    editor.current_file = Path(state.active_file)
+                    editor.current_file = active_path
                     editor.is_modified = False
 
-        except Exception as e:
-            log(f"[APP] Error restoring tabs: {e}")
+        except (AttributeError, LookupError) as e:
+            log(f"[APP] Error restoring tabs (widget not found): {e}")
+        except OSError as e:
+            log(f"[APP] Error restoring tabs (filesystem): {e}")
 
         # Restore chat sessions
         if state.chat_sessions:
@@ -519,8 +566,31 @@ class CliideApp(App[None]):
 
     async def _quit_with_cleanup(self) -> None:
         """Async quit handler with proper cleanup."""
+        # Cancel editor debounce timers and tasks
+        try:
+            editor = self.query_one(EditorWidget)
+            if editor._change_debounce_timer:
+                editor._change_debounce_timer.cancel()
+            if editor._suggestion_task and not editor._suggestion_task.done():
+                editor._suggestion_task.cancel()
+        except Exception:
+            pass
+
+        # Kill any running terminal process
+        try:
+            terminal = self.query_one(TerminalPanel)
+            if terminal._process:
+                terminal._process.terminate()
+                await terminal._process.wait()
+        except Exception:
+            pass
+
         # Stop all LSP servers
         await self.lsp_manager.stop_all_servers()
+
+        # Brief delay to let transports close
+        await asyncio.sleep(0.1)
+
         # Now exit
         self.exit()
 
@@ -915,6 +985,107 @@ class CliideApp(App[None]):
         panel = ProjectSearchPanel(self.project_path)
         self.mount(panel)
 
+    def action_ai_commit(self) -> None:
+        """Generate AI commit message for staged changes."""
+        try:
+            chat = self.query_one(ChatPanel)
+            # Open chat if hidden
+            chat_container = self.query_one("#chat-container")
+            if chat_container.has_class("hidden"):
+                chat_container.remove_class("hidden")
+            # Send /commit command
+            chat.send_message("/commit")
+        except Exception as e:
+            log(f"[APP] Error in AI commit: {e}")
+
+    def action_ai_review(self) -> None:
+        """AI code review of uncommitted changes."""
+        try:
+            chat = self.query_one(ChatPanel)
+            # Open chat if hidden
+            chat_container = self.query_one("#chat-container")
+            if chat_container.has_class("hidden"):
+                chat_container.remove_class("hidden")
+            # Send /review command
+            chat.send_message("/review")
+        except Exception as e:
+            log(f"[APP] Error in AI review: {e}")
+
+    def action_smart_fix(self) -> None:
+        """AI quick fix for error at cursor."""
+        self.run_worker(self._do_smart_fix())
+
+    async def _do_smart_fix(self) -> None:
+        """Execute smart fix for error at current cursor position."""
+        try:
+            editor = self.query_one(EditorWidget)
+
+            if not editor.current_file:
+                self.notify("No file open", severity="warning")
+                return
+
+            # Get cursor position
+            cursor_line, _ = editor.get_cursor_position()
+
+            # Check for diagnostics at cursor line
+            diagnostics = editor.get_diagnostics_at_line(cursor_line)
+
+            if not diagnostics:
+                # Also check adjacent lines
+                for offset in [-1, 1, -2, 2]:
+                    check_line = cursor_line + offset
+                    if check_line >= 0:
+                        diagnostics = editor.get_diagnostics_at_line(check_line)
+                        if diagnostics:
+                            cursor_line = check_line
+                            break
+
+            if not diagnostics:
+                self.notify("No errors at cursor. Move cursor to an error line.", severity="warning")
+                return
+
+            # Use the most severe diagnostic
+            diag = min(diagnostics, key=lambda d: d.get("severity", 4))
+            error_message = diag.get("message", "Unknown error")
+
+            # Get language
+            language = None
+            if editor.current_file:
+                suffix = editor.current_file.suffix.lower()
+                lang_map = {".py": "python", ".js": "javascript", ".ts": "typescript", ".rs": "rust", ".go": "go"}
+                language = lang_map.get(suffix)
+
+            self.notify(f"Generating fix for: {error_message[:50]}...")
+
+            # Generate fix
+            fixed_content = await self.code_actions.smart_fix_error(
+                file_content=editor.text,
+                error_message=error_message,
+                error_line=cursor_line,
+                language=language,
+            )
+
+            if fixed_content and fixed_content != editor.text:
+                # Show diff for approval
+                editor.show_diff(editor.text, fixed_content)
+                self.notify("Fix generated! Press Y to accept, N to reject", severity="information")
+            else:
+                self.notify("Could not generate a fix", severity="warning")
+
+        except Exception as e:
+            log(f"[APP] Error in smart fix: {e}")
+            self.notify(f"Smart fix failed: {e}", severity="error")
+
+    def action_toggle_suggestions(self) -> None:
+        """Toggle inline AI suggestions (ghost text)."""
+        try:
+            editor = self.query_one(EditorWidget)
+            editor.toggle_ghost_text()
+            status = "enabled" if editor._ghost_text_enabled else "disabled"
+            self.notify(f"AI suggestions {status}", severity="information")
+        except Exception as e:
+            log(f"[APP] Error toggling suggestions: {e}")
+
     async def on_project_search_panel_search_result_selected(
         self, event: ProjectSearchPanel.SearchResultSelected
     ) -> None:
@@ -1229,8 +1400,6 @@ class CliideApp(App[None]):
                         # Add tool execution to chat directly
                         tool_msg = chat.add_tool_execution(tool_name, args, tool_call_id)
                         # Track for later update
-                        if not hasattr(self, '_active_tool_messages'):
-                            self._active_tool_messages = {}
                         if tool_call_id:
                             self._active_tool_messages[tool_call_id] = tool_msg
 
@@ -1241,7 +1410,7 @@ class CliideApp(App[None]):
                         tool_call_id = agent_event.get("tool_call_id")
                         log(f"[APP] Tool result: {tool_name} success={getattr(result, 'success', False)}")
                         # Update the tool message in chat
-                        if hasattr(self, '_active_tool_messages') and tool_call_id in self._active_tool_messages:
+                        if tool_call_id in self._active_tool_messages:
                             tool_msg = self._active_tool_messages[tool_call_id]
                             chat.update_tool_execution(tool_msg, result)
                             del self._active_tool_messages[tool_call_id]

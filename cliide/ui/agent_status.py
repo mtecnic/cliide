@@ -9,6 +9,7 @@ import asyncio
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -142,16 +143,16 @@ class AgentTaskWidget(Static):
             progress_bar = self.query_one(ProgressBar)
             # ProgressBar expects integer percentage
             progress_bar.update(progress=int(new_progress * 100))
-        except Exception:
-            pass  # Widget might not be mounted yet
+        except NoMatches:
+            pass  # Widget not mounted yet
 
     def watch_current_action(self, new_action: str) -> None:
         """React to action changes."""
         try:
             action_label = self.query_one(".task-action", Label)
             action_label.update(new_action)
-        except Exception:
-            pass  # Widget might not be mounted yet
+        except NoMatches:
+            pass  # Widget not mounted yet
 
     def set_running(self) -> None:
         """Mark task as running."""

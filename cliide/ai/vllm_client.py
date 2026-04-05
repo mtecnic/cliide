@@ -1,11 +1,16 @@
 """VLLM client for AI-powered features."""
 
 import asyncio
+import threading
 from typing import AsyncIterator, Optional
 
 from openai import AsyncOpenAI, OpenAIError
 
 from cliide.core.config import get_config
+
+
+# Lock for thread-safe singleton access
+_client_lock = threading.Lock()
 
 
 class VLLMClient:
@@ -23,7 +28,11 @@ class VLLMClient:
         self._initialize_client()
 
     def _initialize_client(self) -> None:
-        """Initialize the OpenAI client with VLLM endpoint."""
+        """Initialize the OpenAI client with VLLM endpoint.
+
+        Note: This only creates the client object. The 'connected' flag remains
+        False until check_connection() verifies the server is reachable.
+        """
         from cliide.utils.logger import log
 
         try:
@@ -36,12 +45,14 @@ class VLLMClient:
                 api_key=api_key,
                 timeout=self.config.vllm.timeout,
             )
-            self.connected = True
-            log("[VLLM_CLIENT] Client initialized successfully")
+            # Don't set connected=True here - wait for actual verification
+            # The check_connection() method must be called to verify reachability
+            log("[VLLM_CLIENT] Client object created (not yet verified)")
         except Exception as e:
             log(f"[VLLM_CLIENT] Failed to initialize: {e}")
             print(f"Failed to initialize VLLM client: {e}")
             self.connected = False
+            self.client = None
 
     async def check_connection(self) -> bool:
         """Check if VLLM server is reachable.
@@ -218,19 +229,22 @@ _client: Optional[VLLMClient] = None
 
 
 def get_client() -> VLLMClient:
-    """Get the global VLLM client instance.
+    """Get the global VLLM client instance (thread-safe).
 
     Returns:
         VLLMClient instance
     """
     global _client
     if _client is None:
-        _client = VLLMClient()
+        with _client_lock:
+            # Double-check inside lock
+            if _client is None:
+                _client = VLLMClient()
     return _client
 
 
 def reset_client() -> None:
-    """Reset the global VLLM client instance.
+    """Reset the global VLLM client instance (thread-safe).
 
     This forces a new client to be created on the next get_client() call,
     which will use the latest configuration.
@@ -238,5 +252,6 @@ def reset_client() -> None:
     from cliide.utils.logger import log
 
     global _client
-    log("[VLLM_CLIENT] Resetting global client instance")
-    _client = None
+    with _client_lock:
+        log("[VLLM_CLIENT] Resetting global client instance")
+        _client = None

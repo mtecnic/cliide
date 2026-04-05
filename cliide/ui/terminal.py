@@ -12,6 +12,26 @@ from textual.widgets import Input, RichLog, Static
 from textual.binding import Binding
 
 
+# Safe environment variables to pass to subprocesses
+_ENV_WHITELIST = {
+    "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE",
+    "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "NODE_PATH", "GOPATH",
+    "CARGO_HOME", "RUSTUP_HOME", "JAVA_HOME", "GEM_HOME", "GEM_PATH",
+    "PWD", "OLDPWD", "LOGNAME", "HOSTNAME", "COLORTERM", "EDITOR",
+    "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+    "SSH_AUTH_SOCK", "GPG_AGENT_INFO", "DISPLAY", "WAYLAND_DISPLAY",
+}
+
+
+def _get_safe_env() -> dict[str, str]:
+    """Get a filtered environment dict with only safe variables.
+
+    Returns:
+        Dict of safe environment variables
+    """
+    return {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
+
+
 class TerminalPanel(Container):
     """Integrated terminal panel."""
 
@@ -161,13 +181,15 @@ class TerminalPanel(Container):
             if os.name == "nt":
                 shell = os.environ.get("COMSPEC", "cmd.exe")
 
-            # Run command
+            # Run command with whitelisted environment variables
+            safe_env = _get_safe_env()
+            safe_env["TERM"] = "dumb"  # Disable colors that might break
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(self._cwd),
-                env={**os.environ, "TERM": "dumb"},  # Disable colors that might break
+                env=safe_env,
             )
 
             self._process = process
@@ -203,15 +225,23 @@ class TerminalPanel(Container):
                 self._history_index -= 1
                 input_widget.value = self._history[self._history_index]
                 input_widget.cursor_position = len(input_widget.value)
+            elif self._history and self._history_index == 0:
+                # Already at oldest, show it
+                input_widget.value = self._history[0]
+                input_widget.cursor_position = len(input_widget.value)
             event.prevent_default()
 
         elif event.key == "down":
-            # Next command
+            # Next command - clamp index to valid bounds
+            if not self._history:
+                event.prevent_default()
+                return
             if self._history_index < len(self._history) - 1:
                 self._history_index += 1
                 input_widget.value = self._history[self._history_index]
                 input_widget.cursor_position = len(input_widget.value)
-            elif self._history_index == len(self._history) - 1:
+            else:
+                # At end of history, clear input but keep index at end
                 self._history_index = len(self._history)
                 input_widget.value = ""
             event.prevent_default()
@@ -235,3 +265,11 @@ class TerminalPanel(Container):
         else:
             self.add_class("hidden")
             self.action_focus_editor()
+
+    def on_unmount(self) -> None:
+        """Clean up any running process on unmount."""
+        if self._process:
+            try:
+                self._process.terminate()
+            except Exception:
+                pass

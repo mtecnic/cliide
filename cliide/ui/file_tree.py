@@ -87,6 +87,9 @@ class FileTree(DirectoryTree):
         self._root_path = Path(path).resolve()
         self._is_git_repo = (self._root_path / ".git").exists()
 
+        # Cache for relative path lookups (avoids repeated computation in render_label)
+        self._rel_path_cache: dict[Path, str | None] = {}
+
     def on_mount(self) -> None:
         """Load git status after a short delay (don't block startup)."""
         if self._is_git_repo:
@@ -151,6 +154,26 @@ class FileTree(DirectoryTree):
         if self._is_git_repo:
             self.run_worker(self._load_git_status())
 
+    def _get_relative_path(self, file_path: Path) -> str | None:
+        """Get cached relative path string for a file.
+
+        Args:
+            file_path: Absolute file path
+
+        Returns:
+            Relative path string or None if not under root
+        """
+        if file_path in self._rel_path_cache:
+            return self._rel_path_cache[file_path]
+
+        try:
+            rel = str(file_path.relative_to(self._root_path)).replace("\\", "/")
+            self._rel_path_cache[file_path] = rel
+            return rel
+        except ValueError:
+            self._rel_path_cache[file_path] = None
+            return None
+
     def render_label(
         self, node: DirEntry, base_style, style
     ) -> Text:
@@ -167,23 +190,15 @@ class FileTree(DirectoryTree):
         # Get base label from parent
         label = super().render_label(node, base_style, style)
 
-        # Add git status indicator for files
-        if self._is_git_repo and node.data and node.data.path:
-            try:
-                file_path = node.data.path
-                relative_path = file_path.relative_to(self._root_path)
-                rel_str = str(relative_path).replace("\\", "/")
-
-                if rel_str in self._git_status:
-                    status_code = self._git_status[rel_str]
-                    if status_code in GIT_STATUS_ICONS:
-                        icon, color = GIT_STATUS_ICONS[status_code]
-                        # Prepend status indicator
-                        status_text = Text(f"[{icon}] ", style=color)
-                        return Text.assemble(status_text, label)
-
-            except (ValueError, AttributeError):
-                pass  # Path not relative to root
+        # Add git status indicator for files (only if we have git status data)
+        if self._is_git_repo and self._git_status and node.data and node.data.path:
+            rel_str = self._get_relative_path(node.data.path)
+            if rel_str and rel_str in self._git_status:
+                status_code = self._git_status[rel_str]
+                if status_code in GIT_STATUS_ICONS:
+                    icon, color = GIT_STATUS_ICONS[status_code]
+                    status_text = Text(f"[{icon}] ", style=color)
+                    return Text.assemble(status_text, label)
 
         return label
 

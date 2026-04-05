@@ -447,9 +447,10 @@ Available tools: {', '.join(allowed_tools)}
                 ))
 
             finally:
-                # Clean up running task reference
-                if task_id in self._running_tasks:
-                    del self._running_tasks[task_id]
+                # Clean up running task reference - protected by lock to avoid races
+                async with self._tasks_lock:
+                    if task_id in self._running_tasks:
+                        del self._running_tasks[task_id]
                 # Clean up old completed tasks to prevent memory leak
                 await self._cleanup_old_tasks()
 
