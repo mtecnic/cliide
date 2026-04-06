@@ -1,15 +1,17 @@
 """File tree widget for browsing project files."""
 
 import asyncio
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from rich.text import Text
+from textual.binding import Binding
 from textual.widgets import DirectoryTree
 from textual.widgets._directory_tree import DirEntry
 
-from cliide.core.events import FileOpened
+from cliide.core.events import FileCreated, FileDeleted, FileOpened, FileRenamed
 
 
 # Git status codes
@@ -27,6 +29,13 @@ GIT_STATUS_ICONS = {
 
 class FileTree(DirectoryTree):
     """File tree widget for project navigation with git status."""
+
+    BINDINGS = [
+        Binding("n", "new_file", "New File", show=False),
+        Binding("N", "new_folder", "New Folder", show=False),
+        Binding("d", "delete", "Delete", show=False),
+        Binding("r", "rename", "Rename", show=False),
+    ]
 
     DEFAULT_CSS = """
     FileTree {
@@ -266,3 +275,143 @@ class FileTree(DirectoryTree):
 
         file_path = Path(path)
         return file_path.suffix.lower() in text_extensions
+
+    def _get_selected_path(self) -> Path | None:
+        """Get the currently selected path (file or folder).
+
+        Returns:
+            Selected path or None if nothing selected
+        """
+        if self.cursor_node and self.cursor_node.data:
+            return self.cursor_node.data.path
+        return None
+
+    def _get_parent_folder(self) -> Path:
+        """Get the parent folder for new file/folder creation.
+
+        Returns:
+            Parent folder path (either selected folder or parent of selected file)
+        """
+        selected = self._get_selected_path()
+        if selected:
+            if selected.is_dir():
+                return selected
+            return selected.parent
+        return self._root_path
+
+    async def action_new_file(self) -> None:
+        """Create a new file in the selected directory."""
+        from cliide.ui.dialogs import InputDialog
+
+        parent = self._get_parent_folder()
+
+        def on_submit(name: str) -> None:
+            if name:
+                new_path = parent / name
+                try:
+                    new_path.touch()
+                    self.reload()
+                    self.refresh_git_status()
+                    self.post_message(FileCreated(str(new_path)))
+                    # Open the new file
+                    self.post_message(FileOpened(str(new_path)))
+                except Exception:
+                    pass  # Silently fail if cannot create
+
+        self.app.push_screen(
+            InputDialog(
+                title="New File",
+                prompt=f"Create file in: {parent.name}/",
+                placeholder="filename.ext",
+            ),
+            on_submit,
+        )
+
+    async def action_new_folder(self) -> None:
+        """Create a new folder in the selected directory."""
+        from cliide.ui.dialogs import InputDialog
+
+        parent = self._get_parent_folder()
+
+        def on_submit(name: str) -> None:
+            if name:
+                new_path = parent / name
+                try:
+                    new_path.mkdir(parents=True, exist_ok=True)
+                    self.reload()
+                    self.refresh_git_status()
+                    self.post_message(FileCreated(str(new_path)))
+                except Exception:
+                    pass  # Silently fail if cannot create
+
+        self.app.push_screen(
+            InputDialog(
+                title="New Folder",
+                prompt=f"Create folder in: {parent.name}/",
+                placeholder="foldername",
+            ),
+            on_submit,
+        )
+
+    async def action_delete(self) -> None:
+        """Delete the selected file or folder."""
+        from cliide.ui.dialogs import ConfirmDialog
+
+        selected = self._get_selected_path()
+        if not selected or selected == self._root_path:
+            return  # Don't delete root
+
+        is_dir = selected.is_dir()
+        item_type = "folder" if is_dir else "file"
+
+        def on_confirm(confirmed: bool) -> None:
+            if confirmed:
+                try:
+                    if is_dir:
+                        shutil.rmtree(selected)
+                    else:
+                        selected.unlink()
+                    self.reload()
+                    self.refresh_git_status()
+                    self.post_message(FileDeleted(str(selected)))
+                except Exception:
+                    pass  # Silently fail if cannot delete
+
+        self.app.push_screen(
+            ConfirmDialog(
+                title=f"Delete {item_type.title()}",
+                message=f"Delete {item_type} '{selected.name}'?",
+                confirm_label="Delete",
+                danger=True,
+            ),
+            on_confirm,
+        )
+
+    async def action_rename(self) -> None:
+        """Rename the selected file or folder."""
+        from cliide.ui.dialogs import InputDialog
+
+        selected = self._get_selected_path()
+        if not selected or selected == self._root_path:
+            return  # Don't rename root
+
+        def on_submit(new_name: str) -> None:
+            if new_name and new_name != selected.name:
+                new_path = selected.parent / new_name
+                try:
+                    selected.rename(new_path)
+                    self.reload()
+                    self.refresh_git_status()
+                    self.post_message(FileRenamed(str(selected), str(new_path)))
+                except Exception:
+                    pass  # Silently fail if cannot rename
+
+        self.app.push_screen(
+            InputDialog(
+                title="Rename",
+                prompt="New name:",
+                placeholder=selected.name,
+                initial_value=selected.name,
+            ),
+            on_submit,
+        )

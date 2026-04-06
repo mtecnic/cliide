@@ -142,6 +142,45 @@ class ToolWorkerConfig(BaseModel):
     timeout_seconds: int = Field(default=60, ge=1, le=300, description="Per-tool execution timeout in seconds")
 
 
+class MCPServerConfigModel(BaseModel):
+    """Configuration for a single MCP server."""
+
+    command: str = Field(description="Command to run the MCP server")
+    args: list[str] = Field(default_factory=list, description="Command arguments")
+    env: dict[str, str] = Field(default_factory=dict, description="Environment variables")
+    transport: str = Field(default="stdio", description="Transport type: 'stdio' or 'sse'")
+    url: str | None = Field(default=None, description="URL for SSE transport")
+    enabled: bool = Field(default=True, description="Whether server is enabled")
+
+
+class MCPConfig(BaseModel):
+    """MCP (Model Context Protocol) configuration."""
+
+    enabled: bool = Field(default=False, description="Enable MCP support")
+    servers: dict[str, MCPServerConfigModel] = Field(
+        default_factory=dict,
+        description="MCP server configurations (name -> config)"
+    )
+
+
+class DiagnosticsFeedbackConfig(BaseModel):
+    """LSP diagnostics feedback loop configuration."""
+
+    enabled: bool = Field(default=True, description="Enable LSP diagnostics feedback to AI agent")
+    mode: str = Field(
+        default="auto",
+        description="Feedback mode: 'auto' (auto-fix), 'ask' (ask before fix), 'off' (disabled)"
+    )
+    max_retries: int = Field(default=3, ge=1, le=10, description="Maximum fix attempts per file")
+    wait_timeout_ms: int = Field(default=2000, ge=500, le=10000, description="Time to wait for LSP diagnostics after edit")
+    severity_threshold: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        description="Minimum severity to trigger feedback (1=error, 2=warning, 3=info, 4=hint)"
+    )
+
+
 class InferenceConfig(BaseModel):
     """Inference server configuration for concurrency control.
 
@@ -185,6 +224,8 @@ class Config(BaseSettings):
     context: ContextConfig = Field(default_factory=ContextConfig)
     tool_worker: ToolWorkerConfig = Field(default_factory=ToolWorkerConfig)
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
+    diagnostics_feedback: DiagnosticsFeedbackConfig = Field(default_factory=DiagnosticsFeedbackConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     @classmethod
     def load_from_file(cls, config_path: Path | None = None) -> "Config":

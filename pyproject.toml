@@ -80,7 +80,7 @@ dev = [
 ]
 
 [project.scripts]
-cliide = "cliide.core.app:main"
+cliide = "cliide.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cliide"]

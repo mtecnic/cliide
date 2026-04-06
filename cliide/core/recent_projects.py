@@ -65,7 +65,13 @@ class RecentProjectsManager:
         self.config_dir = Path.home() / ".config" / "cliide"
         self.config_path = self.config_dir / "recent_projects.json"
         self._projects: list[RecentProject] = []
-        self._load()
+        self._loaded = False  # Lazy load on first access
+
+    def _ensure_loaded(self) -> None:
+        """Ensure projects are loaded (lazy load on first access)."""
+        if not self._loaded:
+            self._load()
+            self._loaded = True
 
     def _load(self) -> None:
         """Load recent projects from disk."""
@@ -108,6 +114,7 @@ class RecentProjectsManager:
         Args:
             path: Path to the project directory
         """
+        self._ensure_loaded()
         path = Path(path).resolve()
         path_str = str(path)
 
@@ -139,6 +146,7 @@ class RecentProjectsManager:
         Returns:
             List of recent projects, sorted by most recent first
         """
+        self._ensure_loaded()
         if filter_existing:
             valid = [p for p in self._projects if Path(p.path).exists()]
             # Update list if we filtered any
@@ -154,6 +162,7 @@ class RecentProjectsManager:
         Args:
             path: Path to remove
         """
+        self._ensure_loaded()
         path_str = str(Path(path).resolve())
         self._projects = [p for p in self._projects if p.path != path_str]
         self._save()
@@ -161,10 +170,12 @@ class RecentProjectsManager:
     def clear(self) -> None:
         """Clear all recent projects."""
         self._projects = []
+        self._loaded = True  # Mark as loaded (empty)
         self._save()
 
     def __len__(self) -> int:
         """Number of recent projects."""
+        self._ensure_loaded()
         return len(self._projects)
 
     def __iter__(self):

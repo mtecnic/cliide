@@ -1,11 +1,28 @@
 """Language Server Manager - manages multiple LSP clients."""
 
+import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from cliide.lsp.client import AsyncLSPClient
 from cliide.lsp.servers import get_language_id, get_server_config
 from cliide.utils.logger import log
+
+# Cache TTL in seconds
+_LSP_CACHE_TTL = 60.0
+
+
+class _CacheEntry:
+    """Simple cache entry with TTL."""
+    __slots__ = ('value', 'expires_at')
+
+    def __init__(self, value: Any, ttl: float = _LSP_CACHE_TTL):
+        self.value = value
+        self.expires_at = time.monotonic() + ttl
+
+    def is_valid(self) -> bool:
+        return time.monotonic() < self.expires_at
 
 
 class LanguageServerManager:
@@ -20,7 +37,13 @@ class LanguageServerManager:
         self.workspace_path = workspace_path
         self.clients: dict[str, AsyncLSPClient] = {}  # server_name -> client
         self.file_to_server: dict[str, str] = {}  # file_path -> server_name
+        self.diagnostic_handlers: list[Callable[[str, list[Any]], None]] = []
+        # Keep legacy single handler for backwards compatibility
         self.diagnostic_handler: Optional[Callable[[str, list[Any]], None]] = None
+        # LSP result caches (keyed by (file_path, line, character))
+        self._completion_cache: dict[tuple[str, int, int], _CacheEntry] = {}
+        self._definition_cache: dict[tuple[str, int, int], _CacheEntry] = {}
+        self._hover_cache: dict[tuple[str, int, int], _CacheEntry] = {}
 
     async def start_server_for_file(self, file_path: str) -> bool:
         """Start a language server for a file if not already running.
@@ -51,8 +74,8 @@ class LanguageServerManager:
 
         client = AsyncLSPClient(config.command, self.workspace_path)
 
-        # Register diagnostic handler
-        if self.diagnostic_handler:
+        # Register diagnostic handler if any handlers registered
+        if self.diagnostic_handlers or self.diagnostic_handler:
             client.register_notification_handler(
                 "textDocument/publishDiagnostics",
                 self._handle_diagnostics,
@@ -141,8 +164,23 @@ class LanguageServerManager:
         if not client:
             return
 
+        # Invalidate caches for this file (content changed)
+        self._invalidate_file_cache(file_path)
+
         await client.did_change(file_path, version, content)
         log(f"[LSP Manager] Sent didChange for {file_path} (v{version})")
+
+    def _invalidate_file_cache(self, file_path: str) -> None:
+        """Invalidate all cached results for a file.
+
+        Args:
+            file_path: File path to invalidate
+        """
+        # Remove entries for this file from all caches
+        for cache in (self._completion_cache, self._definition_cache, self._hover_cache):
+            keys_to_remove = [k for k in cache if k[0] == file_path]
+            for key in keys_to_remove:
+                del cache[key]
 
     async def did_save(self, file_path: str) -> None:
         """Notify LSP that a file was saved.
@@ -160,7 +198,7 @@ class LanguageServerManager:
     async def completion(
         self, file_path: str, line: int, character: int
     ) -> Optional[list[Any]]:
-        """Request completions.
+        """Request completions (cached for 60s).
 
         Args:
             file_path: File path
@@ -174,12 +212,21 @@ class LanguageServerManager:
         if not client:
             return None
 
-        return await client.completion(file_path, line, character)
+        # Check cache
+        cache_key = (file_path, line, character)
+        entry = self._completion_cache.get(cache_key)
+        if entry and entry.is_valid():
+            return entry.value
+
+        # Fetch and cache
+        result = await client.completion(file_path, line, character)
+        self._completion_cache[cache_key] = _CacheEntry(result)
+        return result
 
     async def definition(
         self, file_path: str, line: int, character: int
     ) -> Optional[list[Any]]:
-        """Request definition.
+        """Request definition (cached for 60s).
 
         Args:
             file_path: File path
@@ -193,7 +240,16 @@ class LanguageServerManager:
         if not client:
             return None
 
-        return await client.definition(file_path, line, character)
+        # Check cache
+        cache_key = (file_path, line, character)
+        entry = self._definition_cache.get(cache_key)
+        if entry and entry.is_valid():
+            return entry.value
+
+        # Fetch and cache
+        result = await client.definition(file_path, line, character)
+        self._definition_cache[cache_key] = _CacheEntry(result)
+        return result
 
     async def references(
         self, file_path: str, line: int, character: int, include_declaration: bool = True
@@ -238,7 +294,7 @@ class LanguageServerManager:
     async def hover(
         self, file_path: str, line: int, character: int
     ) -> Optional[dict[str, Any]]:
-        """Request hover information.
+        """Request hover information (cached for 60s).
 
         Args:
             file_path: File path
@@ -252,7 +308,16 @@ class LanguageServerManager:
         if not client:
             return None
 
-        return await client.hover(file_path, line, character)
+        # Check cache
+        cache_key = (file_path, line, character)
+        entry = self._hover_cache.get(cache_key)
+        if entry and entry.is_valid():
+            return entry.value
+
+        # Fetch and cache
+        result = await client.hover(file_path, line, character)
+        self._hover_cache[cache_key] = _CacheEntry(result)
+        return result
 
     async def document_symbols(self, file_path: str) -> Optional[list[Any]]:
         """Request document symbols (outline).
@@ -274,10 +339,18 @@ class LanguageServerManager:
     ) -> None:
         """Register a handler for diagnostics.
 
+        Multiple handlers can be registered. Each will be called when diagnostics arrive.
+
         Args:
             handler: Callback function (file_path, diagnostics)
         """
-        self.diagnostic_handler = handler
+        # Legacy support
+        if self.diagnostic_handler is None:
+            self.diagnostic_handler = handler
+        # Add to handlers list
+        if handler not in self.diagnostic_handlers:
+            self.diagnostic_handlers.append(handler)
+            log(f"[LSP Manager] Registered diagnostic handler ({len(self.diagnostic_handlers)} total)")
 
     def _handle_diagnostics(self, params: dict[str, Any]) -> None:
         """Handle diagnostics notification from LSP.
@@ -285,7 +358,7 @@ class LanguageServerManager:
         Args:
             params: Diagnostic parameters
         """
-        if not self.diagnostic_handler:
+        if not self.diagnostic_handlers and not self.diagnostic_handler:
             return
 
         from cliide.lsp.protocol import uri_to_path
@@ -296,4 +369,9 @@ class LanguageServerManager:
 
         log(f"[LSP Manager] Received {len(diagnostics)} diagnostics for {file_path}")
 
-        self.diagnostic_handler(file_path, diagnostics)
+        # Call all registered handlers
+        for handler in self.diagnostic_handlers:
+            try:
+                handler(file_path, diagnostics)
+            except Exception as e:
+                log(f"[LSP Manager] Error in diagnostic handler: {e}")

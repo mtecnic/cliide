@@ -442,8 +442,9 @@ class EditorWidget(TextArea):
         # Try to set language, fall back to None (plain text) if not available
         try:
             self.language = language
-        except Exception:
+        except Exception as e:
             # Language not available, use plain text
+            log(f"[EDITOR] Language '{language}' not available, using plain text: {e}")
             self.language = None
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
@@ -494,8 +495,8 @@ class EditorWidget(TextArea):
             if self._suggestion_task:
                 try:
                     self._suggestion_task.cancel()
-                except Exception:
-                    pass  # Task may have completed between check and cancel
+                except Exception as e:
+                    log(f"[EDITOR] Failed to cancel suggestion task: {e}")
             self._start_suggestion_task()
 
     def get_cursor_position(self) -> tuple[int, int]:

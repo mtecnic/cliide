@@ -88,18 +88,32 @@ class ToolAgent:
         # Initialize audit logger
         self.audit_logger = get_audit_logger(enabled=tools_config.audit_log_enabled)
 
-        # Register all tools at init (eager loading)
-        self._register_tools()
-
-        # Set confirmation callback
-        if confirmation_callback:
-            self.registry.set_confirmation_callback(confirmation_callback)
+        # Track tool registration state (deferred to background)
+        self._tools_registered = False
+        self._confirmation_callback = confirmation_callback
 
         # Subscribe to sub-agent events
         self._setup_event_handlers()
 
+    async def register_tools_async(self) -> None:
+        """Register all tools asynchronously (call from background worker).
+
+        This defers the expensive tool registration to after the UI is mounted.
+        """
+        if self._tools_registered:
+            return
+
+        self._register_tools()
+
+        # Set confirmation callback after tools are registered
+        if self._confirmation_callback:
+            self.registry.set_confirmation_callback(self._confirmation_callback)
+
     def _register_tools(self) -> None:
         """Register all available tools."""
+        if self._tools_registered:
+            return
+
         config = self.config.tools
 
         # Filesystem tools
@@ -194,6 +208,9 @@ class ToolAgent:
             timeout_seconds=worker_config.timeout_seconds,
             confirmation_mode=config.confirmation_mode,
         )
+
+        self._tools_registered = True
+        log("[AGENT] Tools registered successfully")
 
     def _setup_event_handlers(self) -> None:
         """Set up event handlers for sub-agent communication."""

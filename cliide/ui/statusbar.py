@@ -8,6 +8,8 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
+from cliide.core.agent_mode import AgentMode
+
 
 class StatusBar(Widget):
     """Status bar showing file info and application state."""
@@ -18,60 +20,77 @@ class StatusBar(Widget):
 
     DEFAULT_CSS = """
     StatusBar {
-        dock: bottom;
         height: 1;
-        background: $panel;
+        background: #007acc;
         layout: horizontal;
-        border-top: heavy $primary;
     }
 
     #status-left {
         width: 1fr;
         padding: 0 1;
-        background: $boost;
-        color: $primary;
+        background: #007acc;
+        color: #ffffff;
         content-align: left middle;
     }
 
     #status-center {
         width: auto;
         padding: 0 1;
-        background: $surface;
-        color: $accent;
+        background: #007acc;
+        color: #ffffff;
         content-align: center middle;
     }
 
     #status-right {
         width: auto;
         padding: 0 1;
-        background: $panel;
-        color: $success;
+        background: #007acc;
+        color: #ffffff;
         content-align: right middle;
     }
 
     #status-right:hover {
-        background: $boost;
+        background: #005a9e;
         text-style: bold;
     }
 
     .status-modified {
-        color: $warning;
+        color: #ffae57;
     }
 
     .status-error {
-        color: $error;
+        color: #ff6b6b;
     }
 
     .status-connected {
-        color: $success;
+        color: #73d0ff;
     }
 
     .status-disconnected {
-        color: $error;
+        color: #ff6b6b;
     }
 
     .status-checking {
-        color: $warning;
+        color: #ffae57;
+    }
+
+    #status-mode {
+        width: auto;
+        padding: 0 2;
+        content-align: center middle;
+        text-style: bold;
+        background: #005a9e;
+        color: #ffffff;
+    }
+
+    #status-mode.mode-plan {
+        background: #ff8c00;
+        color: #000000;
+    }
+
+    #status-mode.mode-act {
+        background: #16825d;
+        color: #ffffff;
     }
     """
 
@@ -87,11 +106,13 @@ class StatusBar(Widget):
         self.file_modified = False
         self.ai_status = "Ready"
         self.connection_status = "checking"  # checking, connected, disconnected
+        self.agent_mode = AgentMode.ACT  # Default to ACT mode
 
     def compose(self) -> ComposeResult:
         """Compose the status bar."""
         yield Static("📄 No file open", id="status-left")
         yield Static("📍 Line 0, Col 0", id="status-center")
+        yield Static("ACT (F9)", id="status-mode", classes="mode-act")
         yield Static("🟡 Checking... (click to configure)", id="status-right")
 
     def update_file_info(self, file_path: str | None = None) -> None:
@@ -171,6 +192,24 @@ class StatusBar(Widget):
         """
         self.file_modified = modified
         self.update_file_info(self.current_file if self.current_file else None)
+
+    def update_agent_mode(self, mode: AgentMode) -> None:
+        """Update the agent mode indicator.
+
+        Args:
+            mode: Current agent mode
+        """
+        self.agent_mode = mode
+        mode_widget = self.query_one("#status-mode", Static)
+
+        if mode == AgentMode.PLAN:
+            mode_widget.update("PLAN (F9)")
+            mode_widget.remove_class("mode-act")
+            mode_widget.add_class("mode-plan")
+        else:
+            mode_widget.update("ACT (F9)")
+            mode_widget.remove_class("mode-plan")
+            mode_widget.add_class("mode-act")
 
     def on_click(self, event) -> None:
         """Handle click events on the status bar.
