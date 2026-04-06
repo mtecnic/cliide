@@ -41,6 +41,14 @@ LANG_ALIASES = {
     "md": "markdown",
 }
 
+# Precompiled regex patterns (avoid recompiling on every message render)
+_RE_JSON_OBJECT = re.compile(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', re.DOTALL)
+_RE_CODE_BLOCK_JSON = re.compile(r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```', re.DOTALL)
+_RE_THINK_TAG = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+_RE_THINKING_TAG = re.compile(r'<thinking>(.*?)</thinking>', re.DOTALL)
+_RE_CODE_BLOCK = re.compile(r'```(\w*)\n(.*?)```', re.DOTALL)
+_RE_FILE_MENTION = re.compile(r'@([^\s]+)')
+
 
 class ChatMessage(Static):
     """A single chat message."""
@@ -68,13 +76,12 @@ class ChatMessage(Static):
             Tuple of (thinking_content, main_response)
         """
         import json
-        import re
 
         # Try to find JSON object in the content (may be mixed with other text)
         try:
             # Look for JSON object pattern anywhere in content
             # Match { ... } including nested braces
-            json_match = re.search(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', content, re.DOTALL)
+            json_match = _RE_JSON_OBJECT.search(content)
 
             if json_match:
                 json_str = json_match.group(0)
@@ -108,7 +115,7 @@ class ChatMessage(Static):
             pass
 
         # Try markdown code block JSON
-        code_block_match = re.search(r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```', content, re.DOTALL)
+        code_block_match = _RE_CODE_BLOCK_JSON.search(content)
         if code_block_match:
             try:
                 json_str = code_block_match.group(1)
@@ -133,12 +140,11 @@ class ChatMessage(Static):
 
         # Fallback: Check for XML-style tags (for compatibility)
         # Support both <think> (DeepSeek) and <thinking> (others)
-        for tag in ["think", "thinking"]:
-            pattern = rf'<{tag}>(.*?)</{tag}>'
-            thinking_match = re.search(pattern, content, re.DOTALL)
+        for tag_pattern in [_RE_THINK_TAG, _RE_THINKING_TAG]:
+            thinking_match = tag_pattern.search(content)
             if thinking_match:
                 thinking = thinking_match.group(1).strip()
-                main_response = re.sub(pattern, '', content, flags=re.DOTALL).strip()
+                main_response = tag_pattern.sub('', content).strip()
                 return thinking, main_response
 
         # No structured thinking detected - return content as-is
@@ -161,9 +167,6 @@ class ChatMessage(Static):
         Returns:
             Text with code blocks formatted for Rich rendering
         """
-        # Pattern for code blocks: ```lang\ncode\n```
-        code_block_pattern = r'```(\w*)\n(.*?)```'
-
         def replace_code_block(match: re.Match) -> str:
             lang = match.group(1).strip().lower()
             code = match.group(2)
@@ -180,7 +183,7 @@ class ChatMessage(Static):
             lang_label = f" {lang} " if lang and lang != "text" else ""
             return f"\n[dim]{border}[/dim][bold cyan]{lang_label}[/bold cyan]\n[on #1e2430]{code_escaped}[/on #1e2430]\n[dim]{border}[/dim]\n"
 
-        return re.sub(code_block_pattern, replace_code_block, text, flags=re.DOTALL)
+        return _RE_CODE_BLOCK.sub(replace_code_block, text)
 
     def render(self) -> RenderableType:
         """Render the message using Rich Markdown."""
@@ -902,6 +905,10 @@ class ChatPanel(Widget):
             self.run_worker(self._handle_commit_command(args))
         elif command == "/review":
             self.run_worker(self._handle_review_command())
+        elif command == "/diff":
+            self.run_worker(self._handle_diff_command())
+        elif command == "/undo":
+            self.run_worker(self._handle_undo_command())
         elif command == "/help":
             self._show_command_help()
         else:
@@ -918,6 +925,8 @@ class ChatPanel(Widget):
 
 • `/commit` - Generate AI commit message for staged changes
 • `/commit -a` - Stage all changes and generate commit message
+• `/diff` - Show uncommitted changes (staged + unstaged)
+• `/undo` - Undo the last cliide-generated commit
 • `/review` - AI review of uncommitted changes
 • `/help` - Show this help message"""
 
@@ -1038,6 +1047,103 @@ class ChatPanel(Widget):
         event = AIRequestStarted(prompt)
         if hasattr(self.app, 'on_ai_request_started'):
             self.app.on_ai_request_started(event)
+
+    async def _handle_diff_command(self) -> None:
+        """Handle /diff command to show uncommitted changes."""
+        messages = self.query_one("#chat-messages")
+        git_assist = GitAssist(self.workspace_path)
+
+        if not git_assist.is_git_repo:
+            error_msg = ChatMessage("❌ Not a git repository", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            return
+
+        # Get status first
+        status = await git_assist.get_status()
+        if not status:
+            info_msg = ChatMessage("✅ Working tree clean - no uncommitted changes", is_user=False)
+            info_msg.add_class("ai-message")
+            messages.mount(info_msg)
+            return
+
+        # Get full diff
+        diff = await git_assist.get_all_changes_diff()
+
+        if not diff:
+            # Show status even if diff is empty (e.g., untracked files)
+            status_msg = ChatMessage(f"📋 **Git Status:**\n```\n{status}\n```", is_user=False)
+            status_msg.add_class("ai-message")
+            messages.mount(status_msg)
+        else:
+            # Truncate diff if too long
+            max_diff_length = 5000
+            if len(diff) > max_diff_length:
+                diff = diff[:max_diff_length] + "\n\n[... diff truncated ...]"
+
+            diff_msg = ChatMessage(f"📋 **Git Status:**\n```\n{status}\n```\n\n**Changes:**\n```diff\n{diff}\n```", is_user=False)
+            diff_msg.add_class("ai-message")
+            messages.mount(diff_msg)
+
+        messages.scroll_end(animate=False)
+
+    async def _handle_undo_command(self) -> None:
+        """Handle /undo command to revert last AI commit."""
+        from cliide.ai.git_assist import CLIIDE_MARKER
+
+        messages = self.query_one("#chat-messages")
+        git_assist = GitAssist(self.workspace_path)
+
+        if not git_assist.is_git_repo:
+            error_msg = ChatMessage("❌ Not a git repository", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            return
+
+        # Get last commit info
+        commit_info = await git_assist.get_last_commit_info()
+        if not commit_info:
+            error_msg = ChatMessage("❌ Could not get last commit info", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+            return
+
+        # Check if it was a cliide commit
+        if not git_assist.is_cliide_commit(commit_info["message"]):
+            warn_msg = ChatMessage(
+                f"⚠️ Last commit was not made by cliide:\n\n"
+                f"**{commit_info['message'][:50]}{'...' if len(commit_info['message']) > 50 else ''}**\n\n"
+                f"Only cliide-generated commits (marked with `{CLIIDE_MARKER}`) can be undone with `/undo`.\n"
+                f"Use `git reset --soft HEAD~1` manually if you want to undo this commit.",
+                is_user=False
+            )
+            warn_msg.add_class("ai-message")
+            messages.mount(warn_msg)
+            return
+
+        # Undo the commit
+        status_msg = ChatMessage(f"🔄 Undoing commit: **{commit_info['message'][:50]}**...", is_user=False)
+        status_msg.add_class("ai-message")
+        messages.mount(status_msg)
+        messages.scroll_end(animate=False)
+
+        success, result = await git_assist.reset_last_commit(soft=True)
+
+        if success:
+            success_msg = ChatMessage(
+                f"✅ Commit undone successfully!\n\n"
+                f"Changes from **{commit_info['message'][:50]}** are now staged.\n"
+                f"You can modify them and commit again.",
+                is_user=False
+            )
+            success_msg.add_class("ai-message")
+            messages.mount(success_msg)
+        else:
+            error_msg = ChatMessage(f"❌ Failed to undo commit: {result}", is_user=False)
+            error_msg.add_class("ai-message")
+            messages.mount(error_msg)
+
+        messages.scroll_end(animate=False)
 
     def start_ai_response(self, request_id: int | None = None) -> None:
         """Start a new AI response (replaces "Thinking..." with empty message).
@@ -1386,8 +1492,7 @@ class ChatPanel(Widget):
             List of file paths mentioned
         """
         # Pattern to match @filename (ends at space or end of string)
-        pattern = r'@([^\s]+)'
-        matches = re.findall(pattern, message)
+        matches = _RE_FILE_MENTION.findall(message)
         return matches
 
     def get_mentioned_files_content(self, message: str) -> dict[str, str]:

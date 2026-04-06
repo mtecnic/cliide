@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from enum import Enum
 
+from cliide.core.agent_mode import AgentMode, get_agent_mode, is_tool_allowed_in_mode
+
 
 class ToolCategory(str, Enum):
     """Categories of tools for organization."""
@@ -321,13 +323,21 @@ class ToolRegistry:
         """
         return [tool for tool in self._tools.values() if tool.category == category]
 
-    def to_openai_functions(self) -> list[dict[str, Any]]:
+    def to_openai_functions(self, filter_by_mode: bool = True) -> list[dict[str, Any]]:
         """Convert all tools to OpenAI function format.
+
+        Args:
+            filter_by_mode: If True, only include tools allowed in current agent mode
 
         Returns:
             List of function definitions for OpenAI API
         """
-        return [tool.to_openai_function() for tool in self._tools.values()]
+        mode = get_agent_mode()
+        return [
+            tool.to_openai_function()
+            for tool in self._tools.values()
+            if not filter_by_mode or is_tool_allowed_in_mode(tool.name, mode)
+        ]
 
     def set_confirmation_callback(self, callback: Callable[[str, dict], Awaitable[bool]]) -> None:
         """Set callback for tool confirmation.
@@ -343,6 +353,7 @@ class ToolRegistry:
         args: dict[str, Any],
         skip_confirmation: bool = False,
         confirmation_mode: str = "moderate",
+        enforce_mode: bool = True,
     ) -> ToolResult:
         """Execute a tool by name.
 
@@ -351,6 +362,7 @@ class ToolRegistry:
             args: Arguments for the tool
             skip_confirmation: Skip confirmation even if tool requires it
             confirmation_mode: 'conservative', 'moderate', or 'aggressive'
+            enforce_mode: If True, block tools not allowed in current agent mode
 
         Returns:
             ToolResult from execution
@@ -361,6 +373,15 @@ class ToolRegistry:
                 success=False,
                 error=f"Tool not found: {tool_name}"
             )
+
+        # Check agent mode restrictions
+        if enforce_mode:
+            mode = get_agent_mode()
+            if not is_tool_allowed_in_mode(tool_name, mode):
+                return ToolResult(
+                    success=False,
+                    error=f"Tool '{tool_name}' is not allowed in {mode.value.upper()} mode. Switch to ACT mode to use write/execute operations."
+                )
 
         # Validate arguments
         is_valid, error = tool.validate(args)

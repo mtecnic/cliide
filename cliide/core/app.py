@@ -9,16 +9,18 @@ import aiofiles
 import click
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
-from textual.widgets import Footer, Header, Input
+from textual.containers import Container, Horizontal, Vertical
+from textual.widgets import Button, Footer, Header, Input
 
 from cliide.ai.code_actions import CodeActions
 from cliide.ai.context_builder import ContextBuilder
 from cliide.ai.event_bus import AgentEvent, AgentEventType, get_event_bus
 from cliide.ai.pattern_analyzer import PatternAnalyzer
 from cliide.ai.prompt_manager import PromptManager
+from cliide.core.agent_mode import AgentMode, get_agent_mode, toggle_agent_mode
 from cliide.core.config import Config, get_config
-from cliide.core.events import AIRequestStarted, CommandExecuted, FileOpened, ToolConfirmationResult
+from cliide.core.events import AIRequestStarted, CommandExecuted, FileOpened, FileSystemChanged, ToolConfirmationResult
+from cliide.core.file_watcher import FileWatcher
 from cliide.core.recent_projects import RecentProjectsManager
 from cliide.core.session import SessionManager, SessionState
 from cliide.lsp.manager import LanguageServerManager
@@ -30,15 +32,18 @@ from cliide.ui.completion_menu import CompletionMenu
 from cliide.ui.diff_view import DiffView
 from cliide.ui.editor import EditorWidget
 from cliide.ui.file_tree import FileTree
+from cliide.ui.file_tree_actions import FileTreeAction, FileTreeActions
 from cliide.ui.find_replace import FindReplacePanel, find_in_text, replace_in_text
 from cliide.ui.problems_panel import ProblemsPanel
 from cliide.ui.references_panel import ReferencesPanel
 from cliide.ui.rename_panel import RenamePanel
 from cliide.ui.project_picker import ProjectPicker
 from cliide.ui.settings import SettingsScreen
+from cliide.ui.shortcuts import ShortcutsScreen
 from cliide.ui.statusbar import StatusBar
+from cliide.ui.mode_indicator import ModeIndicator
 from cliide.ui.tab_bar import TabBar
-from cliide.ui.agent_status import TabbedAgentPanel
+from cliide.ui.agent_status import ApprovalWidget, TabbedAgentPanel
 from cliide.ui.splitter import Splitter, HorizontalSplitter
 from cliide.ui.symbol_search import SymbolSearchPanel
 from cliide.ui.project_search import ProjectSearchPanel
@@ -53,6 +58,10 @@ class CliideApp(App[None]):
     CSS = """
     Screen {
         layout: vertical;
+    }
+
+    #content-wrapper {
+        height: 1fr;
     }
 
     #main-container {
@@ -92,8 +101,15 @@ class CliideApp(App[None]):
         background: $background;
     }
 
-    #tab-bar {
+    #editor-toolbar {
         width: 100%;
+        height: 3;
+        layout: horizontal;
+        background: $panel;
+    }
+
+    #tab-bar {
+        width: 1fr;
         height: auto;
         min-height: 0;
     }
@@ -120,6 +136,7 @@ class CliideApp(App[None]):
 
     BINDINGS = [
         # Shown in footer (keep minimal)
+        Binding("f1", "show_shortcuts", "Help", show=True),
         Binding("ctrl+p", "command_palette", "Commands", show=True),
         Binding("ctrl+s", "save_file", "Save", show=True),
         Binding("ctrl+k", "toggle_chat", "Chat", show=True),
@@ -146,6 +163,7 @@ class CliideApp(App[None]):
         Binding("ctrl+shift+r", "ai_review", "AI Review", show=False),
         Binding("ctrl+period", "smart_fix", "Quick Fix", show=False),
         Binding("ctrl+shift+i", "toggle_suggestions", "Toggle Suggestions", show=False),
+        Binding("f9", "toggle_agent_mode", "Toggle Plan/Act Mode", show=False),
     ]
 
     def __init__(self, project_path: Path | None = None, **kwargs: Any) -> None:
@@ -163,11 +181,12 @@ class CliideApp(App[None]):
         self.project_path = project_path or Path.cwd()
 
         self.command_palette_visible = False
+        self.prompt_manager = PromptManager()  # Create once, share with CodeActions
         self.code_actions = CodeActions(
             workspace_root=self.project_path,
             confirmation_callback=self._tool_confirmation_callback,
+            prompt_manager=self.prompt_manager,
         )
-        self.prompt_manager = PromptManager()
         self.lsp_manager = LanguageServerManager(self.project_path)
         self.problems_panel_visible = False
         self.pending_code_edit: dict[str, Any] | None = None  # Track code editing in progress
@@ -183,6 +202,9 @@ class CliideApp(App[None]):
         # Track active tool messages for correlation
         self._active_tool_messages: dict[str, Any] = {}
 
+        # File system watcher (started in _initialize_project)
+        self.file_watcher: FileWatcher | None = None
+
         # Register and apply custom theme
         self.register_theme(CLIIDE_THEME)
         self.theme = "cliide"
@@ -191,38 +213,47 @@ class CliideApp(App[None]):
         """Compose the application layout."""
         yield Header()
 
-        with Container(id="main-container"):
-            # Left column: File tree + Agent panel stacked vertically
-            with Container(id="left-column"):
-                with Container(id="file-tree-container"):
-                    yield FileTree(str(self.project_path))
+        # Wrap content and StatusBar in Vertical so StatusBar appears above Footer
+        with Vertical(id="content-wrapper"):
+            with Container(id="main-container"):
+                # Left column: File tree + Agent panel + Mode indicator stacked vertically
+                with Container(id="left-column"):
+                    with Container(id="file-tree-container"):
+                        yield FileTree(str(self.project_path))
+                        yield FileTreeActions()
 
-                # Horizontal splitter between file tree and agent panel
-                yield HorizontalSplitter("file-tree-container", "agent-panel-container", min_height=5)
+                    # Horizontal splitter between file tree and agent panel
+                    yield HorizontalSplitter("file-tree-container", "agent-panel-container", min_height=5)
 
-                with Container(id="agent-panel-container"):
-                    yield TabbedAgentPanel()
+                    with Container(id="agent-panel-container"):
+                        yield TabbedAgentPanel()
 
-            # Splitter: left column | editor
-            yield Splitter("left-column", "editor-container", min_width=15)
+                    # Plan/Act mode indicator at bottom of left column
+                    yield ModeIndicator(id="mode-indicator")
 
-            # Editor + Tab Bar + Problems
-            with Container(id="editor-container"):
-                yield TabBar(id="tab-bar")
-                yield EditorWidget()
-                yield ProblemsPanel(id="problems-panel")
+                # Splitter: left column | editor
+                yield Splitter("left-column", "editor-container", min_width=15)
 
-            # Splitter: editor | chat (resize_right anchors chat to right edge)
-            yield Splitter("editor-container", "chat-container", min_width=25, resize_right=True)
+                # Editor + Tab Bar + Problems
+                with Container(id="editor-container"):
+                    with Horizontal(id="editor-toolbar"):
+                        yield TabBar(id="tab-bar")
+                    yield EditorWidget()
+                    yield ProblemsPanel(id="problems-panel")
 
-            # Chat panel
-            with Container(id="chat-container"):
-                yield ChatPanel(workspace_path=self.project_path)
+                # Splitter: editor | chat (resize_right anchors chat to right edge)
+                yield Splitter("editor-container", "chat-container", min_width=25, resize_right=True)
 
-        # Terminal panel (starts hidden, toggle with Ctrl+`)
-        yield TerminalPanel(id="terminal-panel", classes="hidden")
+                # Chat panel
+                with Container(id="chat-container"):
+                    yield ChatPanel(workspace_path=self.project_path)
 
-        yield StatusBar()
+            # Terminal panel (starts hidden, toggle with Ctrl+`)
+            yield TerminalPanel(id="terminal-panel", classes="hidden")
+
+            # StatusBar at bottom of content wrapper (above Footer)
+            yield StatusBar()
+
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -255,7 +286,11 @@ class CliideApp(App[None]):
         # Check AI connection in background (don't block startup)
         statusbar = self.query_one(StatusBar)
         statusbar.update_ai_status("Connecting...")
+        statusbar.update_agent_mode(get_agent_mode())
         self.run_worker(self._check_ai_connection())
+
+        # Register agent tools in background (deferred from __init__)
+        self.run_worker(self._register_agent_tools())
 
         # Connect editor to LSP manager
         editor = self.query_one(EditorWidget)
@@ -263,6 +298,10 @@ class CliideApp(App[None]):
 
         # Register diagnostic handler
         self.lsp_manager.register_diagnostic_handler(self._handle_diagnostics)
+
+        # Initialize MCP servers if enabled
+        if self.config.mcp.enabled:
+            self.run_worker(self._initialize_mcp())
 
         # Set terminal working directory
         terminal = self.query_one(TerminalPanel)
@@ -277,6 +316,9 @@ class CliideApp(App[None]):
         # Analyze codebase patterns in background
         self.run_worker(self._analyze_patterns())
 
+        # Start file system watcher for auto-refresh
+        self._start_file_watcher()
+
     async def _check_ai_connection(self) -> None:
         """Check AI connection in background and update status."""
         statusbar = self.query_one(StatusBar)
@@ -289,11 +331,19 @@ class CliideApp(App[None]):
         except Exception:
             statusbar.update_ai_status("Disconnected")
 
+    async def _register_agent_tools(self) -> None:
+        """Register agent tools in background (deferred from startup)."""
+        try:
+            await self.code_actions._agent.register_tools_async()
+            log("[APP] Agent tools registered in background")
+        except Exception as e:
+            log(f"[APP] Error registering agent tools: {e}")
+
     async def _analyze_patterns(self) -> None:
         """Analyze codebase patterns in background."""
         try:
-            # Delay slightly to not compete with startup
-            await asyncio.sleep(2)
+            # Brief delay to let UI settle, then analyze in background
+            await asyncio.sleep(0.1)
 
             patterns = await self.pattern_analyzer.analyze(max_files=30)
             if patterns:
@@ -308,6 +358,108 @@ class CliideApp(App[None]):
         except Exception as e:
             log(f"[APP] Pattern analysis error: {e}")
 
+    def _start_file_watcher(self) -> None:
+        """Start file system watcher for auto-refresh."""
+        try:
+            def on_file_change(paths: list[str], event_type: str) -> None:
+                """Callback from file watcher (runs in watcher thread)."""
+                # Schedule UI update on main thread
+                self.call_from_thread(
+                    self.post_message, FileSystemChanged(paths, event_type)
+                )
+
+            self.file_watcher = FileWatcher(self.project_path, on_file_change)
+            self.file_watcher.start()
+            log("[APP] File watcher started")
+        except Exception as e:
+            log(f"[APP] Failed to start file watcher: {e}")
+
+    def _stop_file_watcher(self) -> None:
+        """Stop file system watcher."""
+        if self.file_watcher:
+            self.file_watcher.stop()
+            self.file_watcher = None
+            log("[APP] File watcher stopped")
+
+    def on_file_system_changed(self, event: FileSystemChanged) -> None:
+        """Handle file system changes from watcher."""
+        log(f"[APP] File system changed: {event.event_type} - {len(event.paths)} files")
+
+        # Refresh file tree
+        try:
+            file_tree = self.query_one(FileTree)
+            file_tree.reload()
+            file_tree.refresh_git_status()
+        except Exception as e:
+            log(f"[APP] Error refreshing file tree: {e}")
+
+        # Check if any open files were modified externally
+        if event.event_type in ("modified", "deleted"):
+            try:
+                editor = self.query_one(EditorWidget)
+                current_file = editor.current_file
+                if current_file and current_file in event.paths:
+                    # File is open - check if it was modified or deleted
+                    if event.event_type == "deleted":
+                        # File was deleted - mark as unsaved
+                        editor._is_modified = True
+                        editor._update_tab_modified()
+                    elif not editor._is_modified:
+                        # File modified externally and not modified locally - reload
+                        self.run_worker(self._reload_external_file(current_file))
+            except Exception as e:
+                log(f"[APP] Error checking open file: {e}")
+
+    async def _reload_external_file(self, file_path: str) -> None:
+        """Reload a file that was modified externally."""
+        try:
+            import aiofiles
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+
+            editor = self.query_one(EditorWidget)
+            if editor.current_file == file_path and not editor._is_modified:
+                # File still open and not modified - update content
+                editor.editor.text = content
+                editor._is_modified = False
+                log(f"[APP] Reloaded externally modified file: {file_path}")
+        except Exception as e:
+            log(f"[APP] Error reloading file: {e}")
+
+    async def _initialize_mcp(self) -> None:
+        """Initialize MCP servers in background."""
+        try:
+            from cliide.mcp import get_mcp_manager
+            from cliide.mcp.manager import MCPServerConfig
+
+            mcp_manager = get_mcp_manager()
+
+            # Add configured servers
+            for name, server_config in self.config.mcp.servers.items():
+                mcp_manager.add_server(MCPServerConfig(
+                    name=name,
+                    command=server_config.command,
+                    args=server_config.args,
+                    env=server_config.env,
+                    enabled=server_config.enabled,
+                ))
+
+            # Connect to all enabled servers
+            connected = await mcp_manager.connect_all()
+            if connected > 0:
+                log(f"[APP] Connected to {connected} MCP server(s)")
+
+                # Register MCP tools with the agent's tool registry
+                mcp_tools = mcp_manager.get_tools_for_registry()
+                for tool in mcp_tools:
+                    self.code_actions.agent.registry.register(tool)
+                    log(f"[APP] Registered MCP tool: {tool.name}")
+            else:
+                log("[APP] No MCP servers connected")
+
+        except Exception as e:
+            log(f"[APP] MCP initialization error: {e}")
+
     def _show_startup_picker(self) -> None:
         """Show project picker on startup when no path given."""
         def on_selected(path: Path | None) -> None:
@@ -317,6 +469,7 @@ class CliideApp(App[None]):
                 self.code_actions = CodeActions(
                     workspace_root=path,
                     confirmation_callback=self._tool_confirmation_callback,
+                    prompt_manager=self.prompt_manager,
                 )
                 self.lsp_manager = LanguageServerManager(path)
 
@@ -325,15 +478,15 @@ class CliideApp(App[None]):
                     file_tree = self.query_one(FileTree)
                     file_tree.path = str(path)
                     file_tree.reload()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"[APP] Error updating file tree on startup: {e}")
 
                 # Update chat workspace
                 try:
                     chat = self.query_one(ChatPanel)
                     chat.workspace_path = path
-                except Exception:
-                    pass
+                except Exception as e:
+                    log(f"[APP] Error updating chat workspace on startup: {e}")
 
                 # Run initialization
                 self.run_worker(self._initialize_project())
@@ -378,6 +531,7 @@ class CliideApp(App[None]):
         self.code_actions = CodeActions(
             workspace_root=new_path,
             confirmation_callback=self._tool_confirmation_callback,
+            prompt_manager=self.prompt_manager,
         )
         self.lsp_manager = LanguageServerManager(new_path)
 
@@ -555,8 +709,8 @@ class CliideApp(App[None]):
                 try:
                     file_tree = self.query_one(FileTree)
                     file_tree.reload()
-                except Exception:
-                    pass  # Tree might not exist
+                except Exception as e:
+                    log(f"[APP] Could not refresh file tree: {e}")
             self.call_later(refresh_tree)
 
     def action_quit(self) -> None:
@@ -566,6 +720,9 @@ class CliideApp(App[None]):
 
     async def _quit_with_cleanup(self) -> None:
         """Async quit handler with proper cleanup."""
+        # Stop file watcher
+        self._stop_file_watcher()
+
         # Cancel editor debounce timers and tasks
         try:
             editor = self.query_one(EditorWidget)
@@ -573,26 +730,46 @@ class CliideApp(App[None]):
                 editor._change_debounce_timer.cancel()
             if editor._suggestion_task and not editor._suggestion_task.done():
                 editor._suggestion_task.cancel()
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"[APP] Error cancelling editor tasks during quit: {e}")
 
-        # Kill any running terminal process
+        # Kill any running terminal process (with timeout)
         try:
             terminal = self.query_one(TerminalPanel)
             if terminal._process:
                 terminal._process.terminate()
-                await terminal._process.wait()
-        except Exception:
-            pass
+                try:
+                    await asyncio.wait_for(terminal._process.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    terminal._process.kill()  # Force kill if terminate didn't work
+        except Exception as e:
+            log(f"[APP] Error stopping terminal process during quit: {e}")
 
-        # Stop all LSP servers
-        await self.lsp_manager.stop_all_servers()
+        # Stop MCP servers if any are connected (with timeout)
+        try:
+            from cliide.mcp import get_mcp_manager
+            mcp_manager = get_mcp_manager()
+            if mcp_manager.connected_servers:
+                await asyncio.wait_for(mcp_manager.disconnect_all(), timeout=2.0)
+        except asyncio.TimeoutError:
+            log("[APP] MCP disconnect timed out")
+        except Exception as e:
+            log(f"[APP] Error stopping MCP servers: {e}")
 
-        # Brief delay to let transports close
-        await asyncio.sleep(0.1)
+        # Stop all LSP servers (with timeout)
+        try:
+            await asyncio.wait_for(self.lsp_manager.stop_all_servers(), timeout=2.0)
+        except asyncio.TimeoutError:
+            log("[APP] LSP shutdown timed out")
+        except Exception as e:
+            log(f"[APP] Error stopping LSP servers: {e}")
 
-        # Now exit
+        # Now exit immediately
         self.exit()
+
+    def action_show_shortcuts(self) -> None:
+        """Show keyboard shortcuts help screen."""
+        self.push_screen(ShortcutsScreen())
 
     def action_command_palette(self) -> None:
         """Show command palette."""
@@ -615,7 +792,7 @@ class CliideApp(App[None]):
         self.push_screen(SettingsScreen(), callback=on_dismiss)
 
     async def _tool_confirmation_callback(self, tool_name: str, args: dict) -> bool:
-        """Callback for tool confirmation - routes to agent panel approval queue.
+        """Callback for tool confirmation - shows centered overlay popup.
 
         Args:
             tool_name: Name of the tool requesting confirmation
@@ -635,13 +812,13 @@ class CliideApp(App[None]):
         loop = asyncio.get_running_loop()
         confirmation_future: asyncio.Future[bool] = loop.create_future()
 
-        # Add to the agent panel's approval queue
+        # Mount ApprovalWidget directly on app as overlay (centered on screen)
         try:
-            agent_panel = self.query_one(TabbedAgentPanel)
-            agent_panel.add_approval(tool_name, args, confirmation_future)
-            log(f"[APP] Added tool approval request to queue: {tool_name}")
+            approval_widget = ApprovalWidget(tool_name, args, confirmation_future)
+            self.mount(approval_widget)
+            log(f"[APP] Showing tool approval overlay: {tool_name}")
         except Exception as e:
-            log(f"[APP] Error adding to approval queue: {e}, auto-approving")
+            log(f"[APP] Error showing approval overlay: {e}, auto-approving")
             return True
 
         # Wait for user response
@@ -682,6 +859,7 @@ class CliideApp(App[None]):
         self.code_actions = CodeActions(
             workspace_root=self.project_path,
             confirmation_callback=self._tool_confirmation_callback,
+            prompt_manager=self.prompt_manager,
         )
         log("[APP] Created new CodeActions instance")
         log(f"[APP] CodeActions client URL: {self.code_actions.client.config.vllm.base_url}")
@@ -718,6 +896,23 @@ class CliideApp(App[None]):
         """Toggle agent status panel visibility."""
         agent_container = self.query_one("#agent-panel-container")
         agent_container.toggle_class("hidden")
+
+    def action_toggle_agent_mode(self) -> None:
+        """Toggle between Plan and Act agent modes (Ctrl+M)."""
+        new_mode = toggle_agent_mode()
+
+        # Update StatusBar
+        statusbar = self.query_one(StatusBar)
+        statusbar.update_agent_mode(new_mode)
+
+        # Update ModeIndicator in left column
+        mode_indicator = self.query_one(ModeIndicator)
+        mode_indicator.update_mode(new_mode)
+
+        if new_mode == AgentMode.PLAN:
+            self.notify("PLAN mode: Agent can only read and search", severity="warning")
+        else:
+            self.notify("ACT mode: Agent has full access", severity="information")
 
     def action_toggle_terminal(self) -> None:
         """Toggle integrated terminal (Ctrl+`)."""
@@ -974,12 +1169,15 @@ class CliideApp(App[None]):
     def action_workspace_search(self) -> None:
         """Show workspace-wide search (Find in Files)."""
         # Check if panel already exists
+        from textual.css.query import NoMatches
         try:
             existing = self.query_one(ProjectSearchPanel)
             existing.query_one("#search-input", Input).focus()
             return
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # Panel doesn't exist yet, create it below
+        except Exception as e:
+            log(f"[APP] Error focusing existing search panel: {e}")
 
         # Create and mount search panel
         panel = ProjectSearchPanel(self.project_path)
@@ -1212,12 +1410,26 @@ class CliideApp(App[None]):
         try:
             tab_bar = self.query_one("#tab-bar", TabBar)
             tab_bar.add_tab(event.path, activate=True)
-        except Exception:
-            pass  # Tab bar might not be mounted yet
+        except Exception as e:
+            log(f"[APP] Could not update tab bar: {e}")
 
         # Update status bar
         statusbar = self.query_one(StatusBar)
         statusbar.update_file_info(event.path)
+
+    def on_file_tree_action(self, event: FileTreeAction) -> None:
+        """Handle file tree action button clicks."""
+        file_tree = self.query_one(FileTree)
+
+        # Dispatch to the appropriate action on FileTree
+        if event.action == "new_file":
+            self.run_worker(file_tree.action_new_file())
+        elif event.action == "new_folder":
+            self.run_worker(file_tree.action_new_folder())
+        elif event.action == "delete":
+            self.run_worker(file_tree.action_delete())
+        elif event.action == "rename":
+            self.run_worker(file_tree.action_rename())
 
     async def on_tab_bar_file_selected(self, event: TabBar.FileSelected) -> None:
         """Handle tab selection."""
@@ -1749,10 +1961,12 @@ def main(path: Path | None = None, config: Path | None = None, oapi_url: str | N
         cfg = Config.load_from_file(config)
         set_config(cfg)
 
-    # Create and run app
+    # Create and run app (spinner is handled by __main__.py entry point)
     app = CliideApp(project_path=path)
     app.run()
 
 
 if __name__ == "__main__":
-    main()
+    # Direct execution - redirect to proper entry point
+    from cliide.__main__ import main as entry_main
+    entry_main()

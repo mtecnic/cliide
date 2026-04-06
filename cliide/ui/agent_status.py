@@ -114,6 +114,9 @@ class AgentTaskWidget(Static):
         self.completed_at: datetime | None = None
         self.iteration = 0
         self.max_iterations = 25  # Default
+        # Cached widget references to avoid query_one() in watchers
+        self._progress_bar: ProgressBar | None = None
+        self._action_label: Label | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the task widget."""
@@ -121,8 +124,13 @@ class AgentTaskWidget(Static):
             yield Label(f"[{self.task_id[:8]}]", classes="task-id")
             yield Label(self._truncate_description(), classes="task-description")
 
-        yield ProgressBar(total=100, show_eta=False, classes="task-progress")
-        yield Label(self.current_action or "Starting...", classes="task-action")
+        yield ProgressBar(total=100, show_eta=False, classes="task-progress", id="task-progress")
+        yield Label(self.current_action or "Starting...", classes="task-action", id="task-action")
+
+    def on_mount(self) -> None:
+        """Cache widget references on mount."""
+        self._progress_bar = self.query_one("#task-progress", ProgressBar)
+        self._action_label = self.query_one("#task-action", Label)
 
     def _truncate_description(self) -> str:
         """Truncate description to fit in panel."""
@@ -139,20 +147,14 @@ class AgentTaskWidget(Static):
 
     def watch_progress(self, new_progress: float) -> None:
         """React to progress changes."""
-        try:
-            progress_bar = self.query_one(ProgressBar)
+        if self._progress_bar:
             # ProgressBar expects integer percentage
-            progress_bar.update(progress=int(new_progress * 100))
-        except NoMatches:
-            pass  # Widget not mounted yet
+            self._progress_bar.update(progress=int(new_progress * 100))
 
     def watch_current_action(self, new_action: str) -> None:
         """React to action changes."""
-        try:
-            action_label = self.query_one(".task-action", Label)
-            action_label.update(new_action)
-        except NoMatches:
-            pass  # Widget not mounted yet
+        if self._action_label:
+            self._action_label.update(new_action)
 
     def set_running(self) -> None:
         """Mark task as running."""
@@ -896,21 +898,28 @@ class ToolCallsView(Widget):
 
 
 class ApprovalWidget(Widget):
-    """Widget for a single tool approval request."""
+    """Widget for a single tool approval request - displayed as centered overlay."""
 
     DEFAULT_CSS = """
     ApprovalWidget {
+        layer: overlay;
         layout: vertical;
+        width: 50;
         height: auto;
-        padding: 0 1;
-        margin-bottom: 1;
-        background: $warning 20%;
-        border: round $warning;
+        max-height: 12;
+        padding: 1 2;
+        background: $panel;
+        border: thick $warning;
+        /* Center on screen */
+        align: center middle;
+        offset: 0 0;
     }
 
     ApprovalWidget .approval-header {
         text-style: bold;
         color: $warning;
+        text-align: center;
+        padding-bottom: 1;
     }
 
     ApprovalWidget .approval-args {
@@ -918,18 +927,19 @@ class ApprovalWidget(Widget):
         height: auto;
         max-height: 3;
         overflow: hidden;
+        padding-bottom: 1;
     }
 
     ApprovalWidget .approval-buttons {
         layout: horizontal;
         height: 3;
-        margin-top: 1;
+        align: center middle;
     }
 
     ApprovalWidget Button {
-        min-width: 6;
+        min-width: 8;
         height: 3;
-        margin-right: 1;
+        margin: 0 1;
         color: $text;
     }
 

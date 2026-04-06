@@ -97,7 +97,7 @@ class TerminalPanel(Container):
     def compose(self) -> ComposeResult:
         """Compose the terminal."""
         yield Static(f" Terminal - {self._cwd}", id="terminal-header")
-        yield RichLog(id="terminal-output", highlight=True, markup=True)
+        yield RichLog(id="terminal-output", highlight=True, markup=True, max_lines=10000)
         yield Input(placeholder="Enter command...", id="terminal-input")
 
     def on_mount(self) -> None:

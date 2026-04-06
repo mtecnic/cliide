@@ -115,10 +115,14 @@ class AsyncLSPClient:
                     future.cancel()
             self.pending_requests.clear()
 
-            # Close pipes properly
+            # Close pipes properly with await to prevent "Event loop is closed" error
             if self.process:
                 if self.process.stdin and not self.process.stdin.is_closing():
                     self.process.stdin.close()
+                    try:
+                        await self.process.stdin.wait_closed()
+                    except Exception:
+                        pass
                 if self.process.stdout and not self.process.stdout.at_eof():
                     self.process.stdout.feed_eof()
                 if self.process.stderr and not self.process.stderr.at_eof():

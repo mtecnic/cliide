@@ -17,15 +17,17 @@ class CodeActions:
         self,
         workspace_root: str | Path | None = None,
         confirmation_callback: Callable[[str, dict], Awaitable[bool]] | None = None,
+        prompt_manager: PromptManager | None = None,
     ) -> None:
         """Initialize code actions.
 
         Args:
             workspace_root: Root directory for tool operations
             confirmation_callback: Callback for tool confirmation dialogs
+            prompt_manager: Shared PromptManager instance (avoids duplicate creation)
         """
         self.client = get_client()
-        self.prompt_manager = PromptManager()
+        self.prompt_manager = prompt_manager or PromptManager()
         self.context_builder = ContextBuilder()
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
         self.confirmation_callback = confirmation_callback
