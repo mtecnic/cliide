@@ -72,7 +72,7 @@ python -W ignore::RuntimeWarning venv/bin/cliide
 **Solution**:
 ```bash
 # 1. Check if VLLM server is running
-curl http://192.168.86.30:8000/health
+curl http://your-server:8000/health
 
 # 2. Verify configuration
 cat ~/.config/cliide/config.toml
